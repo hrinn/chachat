@@ -1,5 +1,6 @@
 extern crate clap;
 use clap::{Arg, App, SubCommand, ArgMatches};
+use std::process;
 mod client;
 mod server;
 
@@ -45,19 +46,23 @@ fn run_client(matches: &ArgMatches) {
     let username = matches.value_of("username").unwrap();
     let hostname = matches.value_of("hostname").unwrap();
     let port = parse_port(matches.value_of("port"));
-    client::client(username, hostname, port);
+    client::client(username, hostname, port).unwrap_or_else(|err| {
+        println!("Unable to run client: {}", err);
+        process::exit(1);
+    });
 }
 
 fn run_server(matches: &ArgMatches) {
     let port = parse_port(matches.value_of("port"));
-    server::server(port);
+    server::server(port).unwrap_or_else(|err| {
+        println!("Unable to run server: {}", err);
+        process::exit(1);
+    });
 }
 
 fn parse_port(port: Option<&str>) -> u16 {
-    let port: u16 = match port {
+    match port {
         Some(num) => num.parse().expect("Invalid port number"),
         _ => DEFAULT_PORT,
-    };
-    
-    port
+    }
 }
