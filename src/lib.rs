@@ -1,7 +1,7 @@
 use std::convert::TryInto;
 use bytes::{BufMut, BytesMut};
 use std::net::TcpStream;
-use std::io::{prelude::*};
+use std::io::{self, prelude::*};
 
 pub struct HandlePDU {
     // Application level PDU for establishing user handle
@@ -73,7 +73,7 @@ impl MessagePDU {
 
         // Fill bytes buffer
         buf.put_u16(len.try_into().unwrap());               // PDU Length
-        buf.put_u8(5);                                      // Flag
+        buf.put_u8(7);                                      // Flag
         buf.put_u8(src_handle.len().try_into().unwrap());   // Src Handle Len
         buf.put(src_handle.as_bytes());                     // Src Handle
         buf.put_u8(dest_handle.len().try_into().unwrap());  // Dest Handle Len
@@ -130,14 +130,44 @@ impl MessagePDU {
     }
 }
 
-pub fn get_bytes_from_read(mut client: &TcpStream) -> Result<BytesMut, ()> {
+pub struct HandleRespPDU {
+    // PDU for accepting/rejecting handle
+    // Length: 2B
+    // Flag: 1B (2 = accept, 3 = reject)
+    buf: BytesMut,
+}
+
+impl HandleRespPDU {
+    pub fn new(accept: bool) -> HandleRespPDU {
+        let mut buf = BytesMut::with_capacity(3);
+        buf.put_u16(3);
+        if accept {
+            buf.put_u8(2);
+        } else {
+            buf.put_u8(3);
+        }
+        HandleRespPDU { buf }
+    }
+
+    pub fn read_pdu(mut client: &TcpStream) -> HandleRespPDU {
+        let buf = get_bytes_from_read(&mut client).unwrap();
+        HandleRespPDU { buf }
+    }
+
+    pub fn is_accept(&self) -> bool {
+        self.buf[2] == 2
+    }
+
+     // Returns an array of bytes of the entire PDU
+     pub fn as_bytes(&self) -> &[u8] {
+        &self.buf[..]
+    }
+}
+
+pub fn get_bytes_from_read(mut client: &TcpStream) -> Result<BytesMut, io::Error> {
     // Read the first 2 bytes from the TCP stream, this will be the PDU Len
     let mut len_buf: [u8; 2] = [0; 2];
-    client.read_exact(&mut len_buf).unwrap();
-
-    if len_buf[0] == 0 && len_buf[1] == 0 {
-        return Err(()) // Client disconnected
-    }
+    client.read_exact(&mut len_buf)?;
 
     let len = u16::from_be_bytes(len_buf);
 
