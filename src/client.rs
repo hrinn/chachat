@@ -3,7 +3,7 @@ use std::io;
 use std::io::Write;
 use std::error::Error;
 
-use chachat::HandlePDU;
+use chachat::{HandlePDU, MessagePDU};
 
 pub fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<dyn Error>> {
     let host = format!("{}:{}", hostname, port);
@@ -12,7 +12,7 @@ pub fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<dyn Err
     let mut server = TcpStream::connect(host)?;
 
     // Send handle to server
-    let handle_pdu = HandlePDU::from_handle(handle);
+    let handle_pdu = HandlePDU::new(handle);
     server.write(handle_pdu.as_bytes())?;
 
     // Read user input, send it to server
@@ -26,6 +26,9 @@ pub fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<dyn Err
             .read_line(&mut message)
             .expect("Failed to read user input");
 
-        server.write(message.replace("\n", "").as_bytes())?;
+        // Construct Message PDU
+        let message_pdu = MessagePDU::new(handle, "aperlin", message.replace("\n", "").as_str());
+
+        server.write(message_pdu.as_bytes())?;
     }
 }

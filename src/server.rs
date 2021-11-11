@@ -1,10 +1,9 @@
 use std::net::TcpListener;
 use std::net::TcpStream;
-use std::io::prelude::*;
 use std::error::Error;
 use std::thread;
 
-use chachat::HandlePDU;
+use chachat::*;
 
 pub fn server(port: u16) -> Result<(), Box<dyn Error>> {
     let host = format!("localhost:{}", port);
@@ -36,18 +35,16 @@ fn handle_client(mut client: TcpStream) {
     let username = handle_pdu.get_handle();
     println!("{} connected", username);
 
-    let mut buffer = [0; 1024];
-
     loop {
-        buffer.fill(0);
-        match client.read(&mut buffer) {
-            Ok(0) => {
+        let buffer = match get_bytes_from_read(&mut client) {
+            Ok(buf) => buf,
+            Err(_) => {
                 println!("{} disconnected", username);
                 return;
             },
-            Err(e) => panic!("Failed to read from client TcpStream: {}", e),
-            Ok(_) => (),
-        }
-        println!("{}: {}", username, String::from_utf8_lossy(&buffer));
+        };
+        let message_pdu = MessagePDU::from_bytes(buffer);
+
+        println!("{}->{}: {}", message_pdu.get_src_handle(), message_pdu.get_dest_handle(), message_pdu.get_message());
     }
 }

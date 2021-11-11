@@ -4,7 +4,7 @@ use std::process;
 mod client;
 mod server;
 
-const DEFAULT_PORT: u16 = 7879;
+const DEFAULT_PORT: u16 = 3030;
 
 fn main() {
     let app_m = App::new("ChaChat")
