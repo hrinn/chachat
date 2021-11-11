@@ -4,6 +4,8 @@ use std::io::prelude::*;
 use std::error::Error;
 use std::thread;
 
+use chachat::HandlePDU;
+
 pub fn server(port: u16) -> Result<(), Box<dyn Error>> {
     let host = format!("localhost:{}", port);
 
@@ -27,14 +29,17 @@ pub fn server(port: u16) -> Result<(), Box<dyn Error>> {
 }
 
 fn handle_client(mut client: TcpStream) {
-    let mut username_buffer = [0; 25];
-    client.read(&mut username_buffer).unwrap();
-    let username = String::from_utf8_lossy(&username_buffer);
+    // Read a handle PDU from the client
+    let handle_pdu = HandlePDU::read_pdu(&mut client);
+
+    // Get the handle from the PDU
+    let username = handle_pdu.get_handle();
     println!("{} connected", username);
 
     let mut buffer = [0; 1024];
 
     loop {
+        buffer.fill(0);
         client.read(&mut buffer).unwrap();
         println!("{}: {}", username, String::from_utf8_lossy(&buffer));
     }

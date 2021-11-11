@@ -3,14 +3,17 @@ use std::io;
 use std::io::Write;
 use std::error::Error;
 
-pub fn client(username: &str, hostname: &str, port: u16) -> Result<(), Box<dyn Error>> {
+use chachat::HandlePDU;
+
+pub fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<dyn Error>> {
     let host = format!("{}:{}", hostname, port);
-    println!("{} connecting to {}", username, host);
+    println!("{} connecting to {}", handle, host);
 
     let mut server = TcpStream::connect(host)?;
 
-    // Send username
-    server.write(username.as_bytes())?;
+    // Send handle to server
+    let handle_pdu = HandlePDU::from_handle(handle);
+    server.write(handle_pdu.as_bytes())?;
 
     // Read user input, send it to server
     loop {
@@ -21,8 +24,8 @@ pub fn client(username: &str, hostname: &str, port: u16) -> Result<(), Box<dyn E
 
         io::stdin()
             .read_line(&mut message)
-            .expect("Failed to user input");
+            .expect("Failed to read user input");
 
-        server.write(message.as_bytes())?;
+        server.write(message.replace("\n", "").as_bytes())?;
     }
 }
