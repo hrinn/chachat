@@ -40,7 +40,14 @@ fn handle_client(mut client: TcpStream) {
 
     loop {
         buffer.fill(0);
-        client.read(&mut buffer).unwrap();
+        match client.read(&mut buffer) {
+            Ok(0) => {
+                println!("{} disconnected", username);
+                return;
+            },
+            Err(e) => panic!("Failed to read from client TcpStream: {}", e),
+            Ok(_) => (),
+        }
         println!("{}: {}", username, String::from_utf8_lossy(&buffer));
     }
 }
