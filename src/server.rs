@@ -1,5 +1,5 @@
-use std::net::TcpListener;
 use std::error::Error;
+use std::net::TcpListener;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -7,7 +7,7 @@ use std::io::Write;
 
 use bytes::BytesMut;
 
-use mio::{Events, Poll, Token, Interest};
+use mio::{Events, Poll, Token, Ready, PollOpt};
 use mio::net::TcpStream;
 use mio_extras::channel::{channel, Sender, Receiver};
 
@@ -26,7 +26,7 @@ pub fn server(port: u16) -> Result<(), Box<dyn Error>> {
 
     // Iterate through new connections
     for client in listener.incoming() {
-        let mut client = client.unwrap();
+        let mut client = TcpStream::from_stream(client.unwrap()).unwrap();
         let channels = Arc::clone(&channels);
         
         // Get the handle from the client
@@ -61,34 +61,39 @@ fn send_handle_response(mut client: &TcpStream, accepted: bool) {
     client.write(pdu.as_bytes()).unwrap();
 }
 
-fn handle_client(mut client: TcpStream, handle: &String, channels: SenderMap, receiver: Receiver<Vec<u8>>) {
+fn handle_client(client: TcpStream, handle: &String, channels: SenderMap, receiver: Receiver<Vec<u8>>) {
     // Setup polling
-    let mut poll = Poll::new().unwrap();
-    let events = Events::with_capacity(128);
+    let poll = Poll::new().unwrap();
+    let mut events = Events::with_capacity(128);
 
     // Register event sources (TcpStreams and Channels)
     const PDUS: Token = Token(0);
-    poll.registry().register(&mut client, PDUS, Interest::READABLE).unwrap();
-    poll.registry().register(&mut receiver, PDUS, Interest::READABLE).unwrap();
+    poll.register(&client, PDUS, Ready::readable(), PollOpt::edge()).unwrap();
+    poll.register(&receiver, PDUS, Ready::readable(), PollOpt::edge()).unwrap();
 
     // Wait for message packets
     loop {
         // Wait for packets from socket, or on messages on receiver
+        poll.poll(&mut events, None).unwrap();
 
-        // Read PDU into bytes buffer
-        let buffer = match get_bytes_from_read(&mut client) {
-            Ok(buf) => buf,
-            Err(_) => {
-                println!("{} disconnected", handle); /* TODO: pass clients username to thread */
-                return;
-            },
-        };
-
-        // Determine flag of PDU
-        match get_flag_from_bytes(&buffer) {
-            7 => handle_message(buffer, &channels),
-            _ => eprintln!("Received bad PDU from {}", handle),
+        for event in events.iter() {
+            println!("{:?}", event);
         }
+
+        // // Read PDU into bytes buffer
+        // let buffer = match get_bytes_from_read(&mut client) {
+        //     Ok(buf) => buf,
+        //     Err(_) => {
+        //         println!("{} disconnected", handle); /* TODO: pass clients username to thread */
+        //         return;
+        //     },
+        // };
+
+        // // Determine flag of PDU
+        // match get_flag_from_bytes(&buffer) {
+        //     7 => handle_message(buffer, &channels),
+        //     _ => eprintln!("Received bad PDU from {}", handle),
+        // }
     }
 }
 

@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 use bytes::{BufMut, BytesMut};
-use std::net::TcpStream;
+use mio::net::TcpStream;
 use std::io::{self, prelude::*};
 
 pub struct HandlePDU {

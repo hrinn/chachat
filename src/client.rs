@@ -1,4 +1,5 @@
-use std::net::TcpStream;
+use mio::net::TcpStream as MioTcpStream;
+use std::net::TcpStream as StdTcpStream;
 use std::io::{self, Write};
 use std::error::Error;
 
@@ -8,7 +9,8 @@ pub fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<dyn Err
     // Connect to server
     let host = format!("{}:{}", hostname, port);
     println!("Connecting to {}", host);
-    let mut server = TcpStream::connect(host)?;
+    let server = StdTcpStream::connect(host)?;
+    let mut server = MioTcpStream::from_stream(server)?;
 
     // Send handle to server
     let handle_pdu = HandlePDU::new(handle);
@@ -49,7 +51,7 @@ pub fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<dyn Err
     }
 }
 
-fn send_message(handle: &str, command: &str, mut server: &TcpStream) {
+fn send_message(handle: &str, command: &str, mut server: &MioTcpStream) {
     let command = command[3..].replace("\n", "");
     let index = match command.find(' ') {
         Some(i) => i,
