@@ -8,3 +8,5 @@ edition = "2018"
 [dependencies]
 clap = "2.33.3"
 bytes = "1.1.0"
+mio = "0.7"
+mio-extras = "2.0.5"

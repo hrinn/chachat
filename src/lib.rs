@@ -128,6 +128,10 @@ impl MessagePDU {
     pub fn as_bytes(&self) -> &[u8] {
         &self.buf[..]
     }
+
+    pub fn as_vec(&self) -> Vec<u8> {
+        self.buf[..].to_vec()
+    }
 }
 
 pub struct HandleRespPDU {
@@ -181,4 +185,8 @@ pub fn get_bytes_from_read(mut client: &TcpStream) -> Result<BytesMut, io::Error
     buffer.put(rem_buf.as_slice());
 
     Ok(buffer)
+}
+
+pub fn get_flag_from_bytes(bytes: &BytesMut) -> u8 {
+    bytes[2]
 }
