@@ -3,65 +3,73 @@ use bytes::{BufMut, BytesMut};
 use mio::net::TcpStream;
 use std::io::{self, prelude::*};
 
+pub struct PDU {
+    buffer: BytesMut,
+}
+
+impl PDU {
+    // Creates a PDU from an existing bytes buffer
+    pub fn from_bytes(bytes: BytesMut) -> PDU {
+        PDU { buffer: bytes }
+    }
+
+    // Reads a packet from the TCP Stream and creates a PDU
+    pub fn from_stream_read(mut stream: &TcpStream) -> PDU {
+        let buffer = get_bytes_from_read(&mut stream).unwrap();
+        PDU { buffer }
+    }
+
+    // Returns the length of the PDU in bytes
+    pub fn get_pdu_len(&self) -> usize {
+        let len_slice: [u8; 2] = self.buffer[0..2]
+            .try_into().unwrap();
+        u16::from_be_bytes(len_slice).into()
+    }
+
+    // Returns the flag of the PDU
+    pub fn get_flag(&self) -> u8 {
+        self.buffer[2]
+    }
+
+    // Returns a bytes slice representation of the buffer
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buffer[..]
+    }
+
+    // Returns a vector representation of the buffer
+    pub fn as_vec(&self) -> Vec<u8> {
+        self.buf[..].to_vec()
+    }
+}
+
 pub struct HandlePDU {
-    // Application level PDU for establishing user handle
-    // Length: 2B
-    // Flag 1: 1B
-    // Handle: 1-100B
-    buf: BytesMut,
+    pdu: PDU
 }
 
 impl HandlePDU {
     // Creates a HandlePDU from a handle
     pub fn new(handle: &str) -> HandlePDU {
         // Create bytes buffer
-        let mut buf = BytesMut::with_capacity(handle.len() + 3);
+        let mut buffer = BytesMut::with_capacity(handle.len() + 3);
 
         // Fill bytes buffer
         let header_len: u16 = (handle.len() + 3).try_into().unwrap();
-        buf.put_u16(header_len);    // PDU Length
-        buf.put_u8(1);              // Flag
-        buf.put(handle.as_bytes()); // Handle
+        buffer.put_u16(header_len);    // PDU Length
+        buffer.put_u8(1);              // Flag
+        buffer.put(handle.as_bytes()); // Handle
 
-        HandlePDU { buf }
-    }
-
-    // Reads a PDU from a TCP Stream and creates a HandlePDU
-    pub fn read_pdu(mut client: &TcpStream) -> HandlePDU {
-        let buf = get_bytes_from_read(&mut client).unwrap();
-        HandlePDU { buf }
-    }
-
-    // Returns an array of bytes of the entire PDU
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.buf[..]
-    }
-
-    // Returns the length of the pdu
-    pub fn get_pdu_len(&self) -> usize {
-        let len_bytes: [u8; 2] = self.buf[0..2]
-            .try_into()
-            .expect("Slice with incorrect length");
-        u16::from_be_bytes(len_bytes).into()
+        HandlePDU { pdu { buffer }}
     }
 
     // Returns the handle as a UTF8 String
     pub fn get_handle(&self) -> String {
-        let pdu_len = self.get_pdu_len();
+        let pdu_len = self.pdu.get_pdu_len();
         String::from_utf8_lossy(&self.buf[3..pdu_len]).to_string()
     }
 }
 
 pub struct MessagePDU {
-    // Application level PDU for sending a message to another user
-    // Length: 2B
-    // Flag 5: 1B
-    // Src Handle Length: 1B
-    // Src Handle: 1-100B
-    // Dest Handle Length: 1B
-    // Dest Handle: 1-100B
-    // Message: 1-3891B
-    buf: BytesMut,
+    pdu: PDU,
 }
 
 impl MessagePDU {
@@ -69,53 +77,41 @@ impl MessagePDU {
         let len = 3 + src_handle.len() + 1 + dest_handle.len() + 1 + message.len();
 
         // Create bytes buffer
-        let mut buf = BytesMut::with_capacity(len);
+        let mut buffer = BytesMut::with_capacity(len);
 
         // Fill bytes buffer
-        buf.put_u16(len.try_into().unwrap());               // PDU Length
-        buf.put_u8(7);                                      // Flag
-        buf.put_u8(src_handle.len().try_into().unwrap());   // Src Handle Len
-        buf.put(src_handle.as_bytes());                     // Src Handle
-        buf.put_u8(dest_handle.len().try_into().unwrap());  // Dest Handle Len
-        buf.put(dest_handle.as_bytes());                    // Dest Handle
-        buf.put(message.as_bytes());                        // Message
+        buffer.put_u16(len.try_into().unwrap());               // PDU Length
+        buffer.put_u8(7);                                      // Flag
+        buffer.put_u8(src_handle.len().try_into().unwrap());   // Src Handle Len
+        buffer.put(src_handle.as_bytes());                     // Src Handle
+        buffer.put_u8(dest_handle.len().try_into().unwrap());  // Dest Handle Len
+        buffer.put(dest_handle.as_bytes());                    // Dest Handle
+        buffer.put(message.as_bytes());                        // Message
 
-        MessagePDU { buf }
-    }
-
-    pub fn from_bytes(bytes: BytesMut) -> MessagePDU {
-        // Trim bytes to only necessary size
-        MessagePDU { buf: bytes }
-    }
-
-    pub fn get_pdu_len(&self) -> usize {
-        let len_bytes: [u8; 2] = self.buf[0..2]
-            .try_into()
-            .expect("Slice with incorrect length");
-        u16::from_be_bytes(len_bytes).into()
+        MessagePDU { pdu { buffer }}
     }
 
     pub fn get_src_handle_len(&self) -> usize {
-        self.buf[3].into()
+        self.pdu.buffer[3].into()
     }
 
     pub fn get_src_handle(&self) -> String {
         let start = 4;
         let end = start + self.get_src_handle_len();
 
-        String::from_utf8_lossy(&self.buf[start..end]).to_string()
+        String::from_utf8_lossy(&self.pdu.buffer[start..end]).to_string()
     }
 
     pub fn get_dest_handle_len(&self) -> usize {
         let src_handle_len = self.get_src_handle_len();
-        self.buf[src_handle_len + 4].into()
+        self.pdu.buffer[src_handle_len + 4].into()
     }
 
     pub fn get_dest_handle(&self) -> String {
         let start = self.get_src_handle_len() + 5;
         let end = start + self.get_dest_handle_len();
 
-        String::from_utf8_lossy(&self.buf[start..end]).to_string()
+        String::from_utf8_lossy(&self.pdu.buffer[start..end]).to_string()
     }
 
     pub fn get_message(&self) -> String {
@@ -123,48 +119,26 @@ impl MessagePDU {
 
         String::from_utf8_lossy(&self.buf[start..]).to_string()
     }
-
-    // Returns an array of bytes of the entire PDU
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.buf[..]
-    }
-
-    pub fn as_vec(&self) -> Vec<u8> {
-        self.buf[..].to_vec()
-    }
 }
 
 pub struct HandleRespPDU {
-    // PDU for accepting/rejecting handle
-    // Length: 2B
-    // Flag: 1B (2 = accept, 3 = reject)
-    buf: BytesMut,
+    pdu: PDU,
 }
 
 impl HandleRespPDU {
     pub fn new(accept: bool) -> HandleRespPDU {
-        let mut buf = BytesMut::with_capacity(3);
-        buf.put_u16(3);
+        let mut buffer = BytesMut::with_capacity(3);
+        buffer.put_u16(3);
         if accept {
-            buf.put_u8(2);
+            buffer.put_u8(2);
         } else {
-            buf.put_u8(3);
+            buffer.put_u8(3);
         }
-        HandleRespPDU { buf }
-    }
-
-    pub fn read_pdu(mut client: &TcpStream) -> HandleRespPDU {
-        let buf = get_bytes_from_read(&mut client).unwrap();
-        HandleRespPDU { buf }
+        HandleRespPDU { pdu { buffer }}
     }
 
     pub fn is_accept(&self) -> bool {
-        self.buf[2] == 2
-    }
-
-     // Returns an array of bytes of the entire PDU
-     pub fn as_bytes(&self) -> &[u8] {
-        &self.buf[..]
+        self.pdu.buffer[2] == 2
     }
 }
 
@@ -177,7 +151,7 @@ pub fn get_bytes_from_read(mut client: &TcpStream) -> Result<BytesMut, io::Error
 
     // Read the remaining bytes of the PDU.
     let mut rem_buf = vec![0u8; (len - 2).into()]; 
-    client.read_exact(&mut rem_buf).unwrap();
+    client.read_exact(&mut rem_buf)?;
     
     // Place the bytes in the PDU buffer
     let mut buffer = BytesMut::with_capacity(len.into());
