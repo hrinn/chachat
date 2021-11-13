@@ -1,7 +1,6 @@
 use std::convert::TryInto;
 use bytes::{BufMut, BytesMut};
 use tokio::net::TcpStream;
-use std::io::{self, prelude::*};
 use std::error::Error;
 use std::fmt;
 

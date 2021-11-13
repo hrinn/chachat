@@ -6,7 +6,8 @@ mod server;
 
 const DEFAULT_PORT: u16 = 3030;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let app_m = App::new("ChaChat")
         .version("0.1.0")
         .author("Hayden Rinn and Adam Perlin")
@@ -36,25 +37,25 @@ fn main() {
             .get_matches();
 
     match app_m.subcommand() {
-        ("client", Some(client_m)) => run_client(client_m),
-        ("server", Some(server_m)) => run_server(server_m),
+        ("client", Some(client_m)) => run_client(client_m).await,
+        ("server", Some(server_m)) => run_server(server_m).await,
         _ => println!("No subcommand was used"),
     }
 }
 
-fn run_client(matches: &ArgMatches) {
+async fn run_client(matches: &ArgMatches<'_>) {
     let username = matches.value_of("username").unwrap();
     let hostname = matches.value_of("hostname").unwrap();
     let port = parse_port(matches.value_of("port"));
-    client::client(username, hostname, port).unwrap_or_else(|err| {
+    client::client(username, hostname, port).await.unwrap_or_else(|err| {
         println!("Unable to run client: {}", err);
         process::exit(1);
     });
 }
 
-fn run_server(matches: &ArgMatches) {
+async fn run_server(matches: &ArgMatches<'_>) {
     let port = parse_port(matches.value_of("port"));
-    server::server(port).unwrap_or_else(|err| {
+    server::server(port).await.unwrap_or_else(|err| {
         println!("Unable to run server: {}", err);
         process::exit(1);
     });
