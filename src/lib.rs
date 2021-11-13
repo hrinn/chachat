@@ -1,12 +1,13 @@
 use std::convert::TryInto;
 use bytes::{BufMut, BytesMut};
-use mio::net::TcpStream;
+use tokio::net::TcpStream;
 use std::io::{self, prelude::*};
+use std::error::Error;
+use std::fmt;
 
 pub struct PDU {
     buffer: BytesMut,
 }
-
 
 macro_rules! pdu_impl {
     ($t:ident) => {
@@ -16,12 +17,7 @@ macro_rules! pdu_impl {
                 $t { pdu: PDU::from_bytes(bytes) }
             }
 
-            // Reads a packet from the TCP Stream and creates a PDU
-            pub fn from_stream(stream: &TcpStream) -> $t {
-                $t { pdu: PDU::from_stream(stream) }
-            }
-
-            // Returns the length of the PDU in bytes
+             // Returns the length of the PDU in bytes
             pub fn len(&self) -> usize {
                 self.pdu.len()
             }
@@ -48,12 +44,6 @@ impl PDU {
     // Creates a PDU from an existing bytes buffer
     pub fn from_bytes(bytes: BytesMut) -> PDU {
         PDU { buffer: bytes }
-    }
-
-    // Reads a packet from the TCP Stream and creates a PDU
-    pub fn from_stream(mut stream: &TcpStream) -> PDU {
-        let buffer = get_bytes_from_read(&mut stream).unwrap();
-        PDU { buffer }
     }
 
     // Returns the length of the PDU in bytes
@@ -181,16 +171,57 @@ impl HandleRespPDU {
     }
 }
 
-pub fn get_bytes_from_read(mut client: &TcpStream) -> Result<BytesMut, io::Error> {
-    // Read the first 2 bytes from the TCP stream, this will be the PDU Len
+#[derive(Debug)]
+pub struct ClientDisconnectError;
+impl fmt::Display for ClientDisconnectError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Client disconnect") // user-facing output
+    }
+}
+
+impl Error for ClientDisconnectError {
+    fn description(&self) -> &str {
+       return "client disconnect";
+    }
+} 
+
+pub async fn read_stream(client: &TcpStream, buf: &mut[u8]) -> Result<usize, Box<dyn Error>> {
+    client.readable().await?;
+    let n = match client.try_read(buf) {
+        Ok(0) => {
+            return Err(Box::new(ClientDisconnectError{}))
+        },
+        Ok(n) => {
+            n
+        },
+        Err(e) => {
+            return Err(e.into());
+        }
+    };
+
+    Ok(n)
+}
+
+pub async fn write_stream(client: &TcpStream, buf: &[u8]) -> usize {
+    client.writable().await.unwrap();
+    client.try_write(buf).expect("failed to write to client")
+}
+
+pub async fn read_pdu(client: &TcpStream) -> Result<BytesMut, Box<dyn Error>> {
     let mut len_buf: [u8; 2] = [0; 2];
-    client.read_exact(&mut len_buf)?;
+    let n_read = read_stream(client, &mut len_buf).await?;
+    if n_read != 2 {
+        panic!("invalid pdu");
+    }
 
     let len = u16::from_be_bytes(len_buf);
-
     // Read the remaining bytes of the PDU.
-    let mut rem_buf = vec![0u8; (len - 2).into()]; 
-    client.read_exact(&mut rem_buf)?;
+    let rem_len: usize = (len-2).into();
+    let mut rem_buf = vec![0u8; rem_len]; 
+    let n_read = read_stream(client, rem_buf.as_mut()).await?;
+    if n_read != rem_len {
+        panic!("invalid pdu");
+    }
     
     // Place the bytes in the PDU buffer
     let mut buffer = BytesMut::with_capacity(len.into());

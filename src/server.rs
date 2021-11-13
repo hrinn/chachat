@@ -1,38 +1,30 @@
 use std::error::Error;
-use std::net::TcpListener;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::io::Write;
-
-use bytes::BytesMut;
-
-use mio::{Events, Poll, Token, Ready, PollOpt};
-use mio::net::TcpStream;
-use mio_extras::channel::{channel, Sender, Receiver};
+use tokio::net::*;
+use tokio::sync::mpsc::{Sender, Receiver, channel};
 
 use chachat::*;
 
 type SenderMap = Arc<Mutex<HashMap<String, Sender<Vec<u8>>>>>;
 
-pub fn server(port: u16) -> Result<(), Box<dyn Error>> {
+pub async fn server(port: u16) -> Result<(), Box<dyn Error>> {
     // Create a hashmap for associating handles with channels
     let channels = Arc::new(Mutex::new(HashMap::new()));
 
     // Set up TCP Listener
     let host = format!("localhost:{}", port);
     println!("Launching server on {}", host);
-    let listener = TcpListener::bind(host)?;
+    let listener = TcpListener::bind(host).await?;
 
-    // Iterate through new connections
-    for client in listener.incoming() {
-        let mut client = TcpStream::from_stream(client.unwrap()).unwrap();
+    loop {
+        let (client, address) = listener.accept().await?;
+        println!("incoming connection from {:?}", address);
+
         let channels = Arc::clone(&channels);
-        
-        // Get the handle from the client
-        let handle_pdu = HandlePDU::from_stream(&mut client);
+        let handle_bytes = read_pdu(&client).await?;
+        let handle_pdu = HandlePDU::from_bytes(handle_bytes);
 
-        // Check to see if the handle is already in the table
         if channels.lock().unwrap().contains_key(&handle_pdu.get_handle()) {
             send_handle_response(&client, false);
             println!("{} connecting from {} rejected: Handle already in use", 
@@ -41,86 +33,63 @@ pub fn server(port: u16) -> Result<(), Box<dyn Error>> {
             send_handle_response(&client, true);
             println!("{} connected from {}", handle_pdu.get_handle(), client.peer_addr().unwrap());
             // Create a channel for talking to this client
-            let (sender, receiver) = channel();
+            let (tx, rx) = channel(32);
 
             // Add handle and channel to channels table
-            channels.lock().unwrap().insert(handle_pdu.get_handle(), sender);
+            channels.lock().unwrap().insert(handle_pdu.get_handle(), tx);
 
-            // Spawn a thread to handle this client
-            thread::spawn(move || {
-                handle_client(client, &handle_pdu.get_handle(), channels, receiver);
+            
+            let write_client = Arc::new(client);
+            let read_client = Arc::clone(&write_client);
+            tokio::spawn(async move {
+                handle_pdus_from_client(read_client, &handle_pdu.get_handle(), channels);
+            });
+
+            tokio::spawn(async move {
+                handle_pdus_to_client(write_client, rx);
             });
         }       
     }
-
-    Ok(())
 }
 
-fn send_handle_response(mut client: &TcpStream, accepted: bool) {
+async fn send_handle_response(client: &TcpStream, accepted: bool) {
     let pdu = HandleRespPDU::new(accepted);
-    client.write(pdu.as_bytes()).unwrap();
+    write_stream(client, pdu.as_bytes()).await;
 }
 
-fn handle_client(client: TcpStream, handle: &String, channels: SenderMap, receiver: Receiver<Vec<u8>>) {
-    // Setup polling
-    let poll = Poll::new().unwrap();
-    let mut events = Events::with_capacity(128);
-    const STREAM: Token = Token(0);
-    const CHANNEL: Token = Token(1);
-
-    // Register event sources
-    poll.register(&client, STREAM, Ready::readable(), PollOpt::edge()).unwrap(); // Messages from client
-    poll.register(&receiver, CHANNEL, Ready::readable(), PollOpt::edge()).unwrap(); // Messages from other threads
-
-    // Event loop
+async fn handle_pdus_from_client(client: Arc<TcpStream>, handle: &String, channels: SenderMap) {
     loop {
-        poll.poll(&mut events, None).unwrap();
+        let buf = match read_pdu(&client).await {
+        Err(e) => {
+            println!("{:?}", e);
+            // remove sender that corresponds to this handle from sender map 
+            return;
+        },
+        Ok(buf) => buf
+        };
 
-        for event in events.iter() {
-            match event.token() {
-                STREAM => read_stream(&client, handle, &channels),
-                CHANNEL => read_channel(&receiver),
-                _ => unreachable!(),
-            }
+        match get_flag_from_bytes(&buf) {
+            7 => handle_message(MessagePDU::from_bytes(buf), &channels).await,
+            _ => unreachable!()
         }
     }
 }
 
-fn read_stream(mut client: &TcpStream, handle: &String, channels: &SenderMap) {
-    // Read PDU from stream
-    let buffer = match get_bytes_from_read(&mut client) {
-        Ok(buf) => buf,
-        Err(_) => {
-            println!("{} disconnected", handle);
-            return;
-        },
-    };
-
-    // Determine flag of PDU
-    match get_flag_from_bytes(&buffer) {
-        7 => handle_message(buffer, &channels),
-        _ => eprintln!("Received bad PDU from {}", handle),
-    }
-}
-
-fn handle_message(buffer: BytesMut, channels: &SenderMap) {
-    let message_pdu = MessagePDU::from_bytes(buffer);
-    println!("{}->{}: {}B", message_pdu.get_src_handle(), message_pdu.get_dest_handle(), message_pdu.get_message().len());
-
-    // Check if the dest handle is in the table
-    if let Some(sender) = channels.lock().unwrap().get(&message_pdu.get_dest_handle()) {
-        // Receipient is currently connected
-        // Forward pdu to receiving client through channels
-        // I should do a trait on the pdus that get sent to other users so that I can send it without changing
-        sender.send(message_pdu.as_vec()).unwrap();
+async fn handle_message(pdu: MessagePDU, channels: &SenderMap) {
+    let dest_handle = pdu.get_dest_handle();
+    if let Some(tx) = channels.lock().unwrap().get(&dest_handle) {
+        tx.send(pdu.as_vec()).await.unwrap();
     } else {
-        // Trying to send a message to someone who doesn't exist
-        // TODO: Should we send an error back to the sender?
-        eprintln!("{} is trying to message someone who doesn't exist!", message_pdu.get_src_handle());
+        println!("user {} is not logged in", dest_handle);
     }
 }
 
-fn read_channel(receiver: &Receiver<Vec<u8>>) {
-    let message = receiver.try_recv().unwrap();
-    println!("Channel got: {}", String::from_utf8_lossy(&message));
+async fn handle_pdus_to_client(client: Arc<TcpStream>, mut rx: Receiver<Vec<u8>> ) {
+    loop {
+        if let Some(msg) = rx.recv().await {
+            write_stream(&client, &msg);
+        } else {
+            return;
+        }
+    }
 }
