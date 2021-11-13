@@ -20,10 +20,8 @@ pub async fn server(port: u16) -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(host).await?;
 
     loop {
-        let (client, address) = listener.accept().await?;
-        println!("incoming connection from {:?}", address);
+        let (client, addr) = listener.accept().await?;
 
-        let addr = client.peer_addr().unwrap();
         let (mut read_client, mut write_client) = client.into_split();
 
         let channels = Arc::clone(&channels);
@@ -61,12 +59,13 @@ async fn send_handle_response(client: &mut OwnedWriteHalf, accepted: bool) {
     });
 }
 
-async fn handle_pdus_from_client(client: &mut tcp::OwnedReadHalf, _handle: &String, channels: SenderMap) {
+async fn handle_pdus_from_client(client: &mut tcp::OwnedReadHalf, handle: &String, channels: SenderMap) {
     loop {
         let buf = match read_pdu(client).await {
-        Err(e) => {
-            println!("{:?}", e);
-            // remove sender that corresponds to this handle from sender map 
+        Err(_) => {
+            println!("{} disconnected", handle);
+            // remove sender that corresponds to this handle from sender map
+            channels.lock().await.remove(handle);
             return;
         },
         Ok(buf) => buf
@@ -94,7 +93,7 @@ async fn handle_pdus_to_client(write_client: &mut OwnedWriteHalf, mut rx: Receiv
         if let Some(msg) = rx.recv().await {
             write_client.write_all(&msg).await.unwrap();
         } else {
-            return;
+            return; // Channel closed, client disconnected
         }
     }
 }

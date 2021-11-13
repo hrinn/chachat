@@ -64,6 +64,7 @@ async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf) -> Re
         if input.len() < 2 {
             continue;
         }
+        // split input into vectors of str slices
 
         match &input[0..2] {
             "/m" | "/M" => send_message(handle, &input, server).await.unwrap(),
@@ -78,7 +79,10 @@ async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf) -> Re
 
 async fn handle_pdus_from_server(server: &mut OwnedReadHalf) -> Result<(), Box<dyn Error>> {
     loop {
-        let buf = read_pdu(server).await.unwrap();
+        let buf = match read_pdu(server).await {
+            Ok(buf) => buf,
+            Err(_) => return Ok(()), // Client disconnected, end this task
+        };
 
         match get_flag_from_bytes(&buf) {
             7 => display_message(MessagePDU::from_bytes(buf)).await?,
@@ -88,7 +92,11 @@ async fn handle_pdus_from_server(server: &mut OwnedReadHalf) -> Result<(), Box<d
 }
 
 async fn send_message(handle: &str, buffer: &str, server: &mut OwnedWriteHalf) -> Result<(), Box<dyn Error>> {
-    let buffer = buffer[3..].replace("\n", "");
+    if buffer.len() < 6 {
+        eprintln!("USAGE: /m <USER> <MESSAGE>");
+        return Ok(())
+    }
+    let buffer = &buffer[3..];
     let index = match buffer.find(' ') {
         Some(i) => i,
         None => {
@@ -98,6 +106,7 @@ async fn send_message(handle: &str, buffer: &str, server: &mut OwnedWriteHalf) -
     };
 
     let (dest, message) = buffer.split_at(index);
+    let message = &message[1..];
     let message_pdu = MessagePDU::new(handle, dest, message);
     server.write_all( message_pdu.as_bytes()).await?;
 
@@ -105,7 +114,7 @@ async fn send_message(handle: &str, buffer: &str, server: &mut OwnedWriteHalf) -
 }
 
 async fn display_message(pdu: MessagePDU) -> Result<(), tokio::task::JoinError> {
-    let out = format!("[message from {}]: {}", pdu.get_src_handle(), pdu.get_message());
+    let out = format!("[{}]: {}\n> ", pdu.get_src_handle(), pdu.get_message());
     let mut stdout = std::io::stdout();
     tokio::task::spawn_blocking(move || {
         stdout.write(out.as_bytes()).unwrap();
