@@ -1,7 +1,8 @@
 use std::error::Error;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 use tokio::net::*;
+use futures::lock::Mutex;
 use tokio::sync::mpsc::{Sender, Receiver, channel};
 use chachat::*;
 
@@ -24,7 +25,7 @@ pub async fn server(port: u16) -> Result<(), Box<dyn Error>> {
         let handle_bytes = read_pdu(&client).await?;
         let handle_pdu = HandlePDU::from_bytes(handle_bytes);
 
-        if channels.lock().unwrap().contains_key(&handle_pdu.get_handle()) {
+        if channels.lock().await.contains_key(&handle_pdu.get_handle()) {
             send_handle_response(&client, false).await;
             println!("{} connecting from {} rejected: Handle already in use", 
                 handle_pdu.get_handle(), client.peer_addr().unwrap());
@@ -35,8 +36,7 @@ pub async fn server(port: u16) -> Result<(), Box<dyn Error>> {
             let (tx, rx) = channel(32);
 
             // Add handle and channel to channels table
-            channels.lock().unwrap().insert(handle_pdu.get_handle(), tx);
-
+            channels.lock().await.insert(handle_pdu.get_handle(), tx);
             
             let write_client = Arc::new(client);
             let read_client = Arc::clone(&write_client);
@@ -76,7 +76,7 @@ async fn handle_pdus_from_client(client: Arc<TcpStream>, _handle: &String, chann
 
 async fn handle_message(pdu: MessagePDU, channels: &SenderMap) {
     let dest_handle = pdu.get_dest_handle();
-    if let Some(tx) = channels.lock().unwrap().get(&dest_handle) {
+    if let Some(tx) = channels.lock().await.get(&dest_handle) {
         tx.send(pdu.as_vec()).await.unwrap();
     } else {
         println!("user {} is not logged in", dest_handle);
