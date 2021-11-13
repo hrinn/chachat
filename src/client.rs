@@ -17,7 +17,7 @@ pub fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<dyn Err
     server.write(handle_pdu.as_bytes())?;
 
     // Read server's response
-    let handle_resp_pdu = HandleRespPDU::read_pdu(&mut server);
+    let handle_resp_pdu = HandleRespPDU::from_stream(&mut server);
     if !handle_resp_pdu.is_accept() {
         // Handle was rejected
         println!("Handle {} is already in use", handle);

@@ -7,6 +7,43 @@ pub struct PDU {
     buffer: BytesMut,
 }
 
+
+macro_rules! pdu_impl {
+    ($t:ident) => {
+        impl $t {
+            // Creates a PDU from an existing bytes buffer
+            pub fn from_bytes(bytes: BytesMut) -> $t {
+                $t { pdu: PDU::from_bytes(bytes) }
+            }
+
+            // Reads a packet from the TCP Stream and creates a PDU
+            pub fn from_stream(stream: &TcpStream) -> $t {
+                $t { pdu: PDU::from_stream(stream) }
+            }
+
+            // Returns the length of the PDU in bytes
+            pub fn len(&self) -> usize {
+                self.pdu.len()
+            }
+
+            // Returns the flag of the PDU
+            pub fn get_flag(&self) -> u8 {
+                self.pdu.get_flag()
+            }
+
+            // Returns a bytes slice representation of the buffer
+            pub fn as_bytes(&self) -> &[u8] {
+                self.pdu.as_bytes()
+            }
+
+            // Returns a vector representation of the buffer
+            pub fn as_vec(&self) -> Vec<u8> {
+                self.pdu.as_vec()
+            }
+        }
+    }
+}
+
 impl PDU {
     // Creates a PDU from an existing bytes buffer
     pub fn from_bytes(bytes: BytesMut) -> PDU {
@@ -14,13 +51,13 @@ impl PDU {
     }
 
     // Reads a packet from the TCP Stream and creates a PDU
-    pub fn from_stream_read(mut stream: &TcpStream) -> PDU {
+    pub fn from_stream(mut stream: &TcpStream) -> PDU {
         let buffer = get_bytes_from_read(&mut stream).unwrap();
         PDU { buffer }
     }
 
     // Returns the length of the PDU in bytes
-    pub fn get_pdu_len(&self) -> usize {
+    pub fn len(&self) -> usize {
         let len_slice: [u8; 2] = self.buffer[0..2]
             .try_into().unwrap();
         u16::from_be_bytes(len_slice).into()
@@ -38,7 +75,7 @@ impl PDU {
 
     // Returns a vector representation of the buffer
     pub fn as_vec(&self) -> Vec<u8> {
-        self.buf[..].to_vec()
+        self.buffer[..].to_vec()
     }
 }
 
@@ -46,6 +83,7 @@ pub struct HandlePDU {
     pdu: PDU
 }
 
+pdu_impl!(HandlePDU);
 impl HandlePDU {
     // Creates a HandlePDU from a handle
     pub fn new(handle: &str) -> HandlePDU {
@@ -58,13 +96,12 @@ impl HandlePDU {
         buffer.put_u8(1);              // Flag
         buffer.put(handle.as_bytes()); // Handle
 
-        HandlePDU { pdu { buffer }}
+        HandlePDU { pdu: PDU { buffer }}
     }
 
     // Returns the handle as a UTF8 String
     pub fn get_handle(&self) -> String {
-        let pdu_len = self.pdu.get_pdu_len();
-        String::from_utf8_lossy(&self.buf[3..pdu_len]).to_string()
+        String::from_utf8_lossy(&self.pdu.buffer[3..self.pdu.len()]).to_string()
     }
 }
 
@@ -72,6 +109,7 @@ pub struct MessagePDU {
     pdu: PDU,
 }
 
+pdu_impl!(MessagePDU);
 impl MessagePDU {
     pub fn new(src_handle: &str, dest_handle: &str, message: &str) -> MessagePDU {
         let len = 3 + src_handle.len() + 1 + dest_handle.len() + 1 + message.len();
@@ -88,7 +126,7 @@ impl MessagePDU {
         buffer.put(dest_handle.as_bytes());                    // Dest Handle
         buffer.put(message.as_bytes());                        // Message
 
-        MessagePDU { pdu { buffer }}
+        MessagePDU { pdu: PDU { buffer }}
     }
 
     pub fn get_src_handle_len(&self) -> usize {
@@ -117,7 +155,7 @@ impl MessagePDU {
     pub fn get_message(&self) -> String {
         let start = 5 + self.get_src_handle_len() + self.get_dest_handle_len();
 
-        String::from_utf8_lossy(&self.buf[start..]).to_string()
+        String::from_utf8_lossy(&self.pdu.buffer[start..]).to_string()
     }
 }
 
@@ -125,6 +163,7 @@ pub struct HandleRespPDU {
     pdu: PDU,
 }
 
+pdu_impl!(HandleRespPDU);
 impl HandleRespPDU {
     pub fn new(accept: bool) -> HandleRespPDU {
         let mut buffer = BytesMut::with_capacity(3);
@@ -134,7 +173,7 @@ impl HandleRespPDU {
         } else {
             buffer.put_u8(3);
         }
-        HandleRespPDU { pdu { buffer }}
+        HandleRespPDU { pdu: PDU { buffer }}
     }
 
     pub fn is_accept(&self) -> bool {

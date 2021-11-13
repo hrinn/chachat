@@ -30,7 +30,7 @@ pub fn server(port: u16) -> Result<(), Box<dyn Error>> {
         let channels = Arc::clone(&channels);
         
         // Get the handle from the client
-        let handle_pdu = HandlePDU::read_pdu(&mut client);
+        let handle_pdu = HandlePDU::from_stream(&mut client);
 
         // Check to see if the handle is already in the table
         if channels.lock().unwrap().contains_key(&handle_pdu.get_handle()) {
