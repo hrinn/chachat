@@ -1,6 +1,7 @@
 use std::convert::TryInto;
 use bytes::{BufMut, BytesMut};
-use tokio::net::TcpStream;
+use tokio::net::tcp::OwnedReadHalf;
+use tokio::io::*;
 use std::error::Error;
 use std::fmt;
 
@@ -184,43 +185,16 @@ impl Error for ClientDisconnectError {
     }
 } 
 
-pub async fn read_stream(client: &TcpStream, buf: &mut[u8]) -> Result<usize, Box<dyn Error>> {
-    client.readable().await?;
-    let n = match client.try_read(buf) {
-        Ok(0) => {
-            return Err(Box::new(ClientDisconnectError{}))
-        },
-        Ok(n) => {
-            n
-        },
-        Err(e) => {
-            return Err(e.into());
-        }
-    };
-
-    Ok(n)
-}
-
-pub async fn write_stream(client: &TcpStream, buf: &[u8]) -> usize {
-    client.writable().await.unwrap();
-    client.try_write(buf).expect("failed to write to client")
-}
-
-pub async fn read_pdu(client: &TcpStream) -> Result<BytesMut, Box<dyn Error>> {
+pub async fn read_pdu(client: &mut OwnedReadHalf) -> Result<BytesMut> {
     let mut len_buf: [u8; 2] = [0; 2];
-    let n_read = read_stream(client, &mut len_buf).await?;
-    if n_read != 2 {
-        panic!("invalid pdu");
-    }
+    client.read_exact(&mut len_buf).await?;
 
     let len = u16::from_be_bytes(len_buf);
     // Read the remaining bytes of the PDU.
     let rem_len: usize = (len-2).into();
     let mut rem_buf = vec![0u8; rem_len]; 
-    let n_read = read_stream(client, rem_buf.as_mut()).await?;
-    if n_read != rem_len {
-        panic!("invalid pdu");
-    }
+
+    client.read_exact(&mut rem_buf).await?;
     
     // Place the bytes in the PDU buffer
     let mut buffer = BytesMut::with_capacity(len.into());
