@@ -65,35 +65,41 @@ fn handle_client(client: TcpStream, handle: &String, channels: SenderMap, receiv
     // Setup polling
     let poll = Poll::new().unwrap();
     let mut events = Events::with_capacity(128);
+    const STREAM: Token = Token(0);
+    const CHANNEL: Token = Token(1);
 
-    // Register event sources (TcpStreams and Channels)
-    const PDUS: Token = Token(0);
-    poll.register(&client, PDUS, Ready::readable(), PollOpt::edge()).unwrap();
-    poll.register(&receiver, PDUS, Ready::readable(), PollOpt::edge()).unwrap();
+    // Register event sources
+    poll.register(&client, STREAM, Ready::readable(), PollOpt::edge()).unwrap(); // Messages from client
+    poll.register(&receiver, CHANNEL, Ready::readable(), PollOpt::edge()).unwrap(); // Messages from other threads
 
-    // Wait for message packets
+    // Event loop
     loop {
-        // Wait for packets from socket, or on messages on receiver
         poll.poll(&mut events, None).unwrap();
 
         for event in events.iter() {
-            println!("{:?}", event);
+            match event.token() {
+                STREAM => read_stream(&client, handle, &channels),
+                CHANNEL => read_channel(&receiver),
+                _ => unreachable!(),
+            }
         }
+    }
+}
 
-        // // Read PDU into bytes buffer
-        // let buffer = match get_bytes_from_read(&mut client) {
-        //     Ok(buf) => buf,
-        //     Err(_) => {
-        //         println!("{} disconnected", handle); /* TODO: pass clients username to thread */
-        //         return;
-        //     },
-        // };
+fn read_stream(mut client: &TcpStream, handle: &String, channels: &SenderMap) {
+    // Read PDU from stream
+    let buffer = match get_bytes_from_read(&mut client) {
+        Ok(buf) => buf,
+        Err(_) => {
+            println!("{} disconnected", handle);
+            return;
+        },
+    };
 
-        // // Determine flag of PDU
-        // match get_flag_from_bytes(&buffer) {
-        //     7 => handle_message(buffer, &channels),
-        //     _ => eprintln!("Received bad PDU from {}", handle),
-        // }
+    // Determine flag of PDU
+    match get_flag_from_bytes(&buffer) {
+        7 => handle_message(buffer, &channels),
+        _ => eprintln!("Received bad PDU from {}", handle),
     }
 }
 
@@ -112,4 +118,9 @@ fn handle_message(buffer: BytesMut, channels: &SenderMap) {
         // TODO: Should we send an error back to the sender?
         eprintln!("{} is trying to message someone who doesn't exist!", message_pdu.get_src_handle());
     }
+}
+
+fn read_channel(receiver: &Receiver<Vec<u8>>) {
+    let message = receiver.try_recv().unwrap();
+    println!("Channel got: {}", String::from_utf8_lossy(&message));
 }
