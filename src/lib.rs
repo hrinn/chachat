@@ -1,9 +1,14 @@
 use std::convert::TryInto;
+use std::error::Error;
+use std::fmt;
 use bytes::{BufMut, BytesMut};
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::io::*;
-use std::error::Error;
-use std::fmt;
+use chacha20poly1305::{ChaCha20Poly1305 as ChaCha20, Key};
+use chacha20poly1305::aead::NewAead;
+use rand::prelude::*;
+use rand_chacha::ChaCha20Rng;
+use rand_seeder::Seeder;
 
 pub struct PDU {
     buffer: BytesMut,
@@ -101,20 +106,21 @@ pub struct MessagePDU {
 
 pdu_impl!(MessagePDU);
 impl MessagePDU {
-    pub fn new(src_handle: &str, dest_handle: &str, message: &str) -> MessagePDU {
-        let len = 3 + src_handle.len() + 1 + dest_handle.len() + 1 + message.len();
+    pub fn new(src_handle: &str, dest_handle: &str, nonce: &[u8], ciphertext: &[u8]) -> MessagePDU {
+        let len = 3 + 1 + src_handle.len() + 1 + dest_handle.len() + 12 + ciphertext.len();
 
         // Create bytes buffer
         let mut buffer = BytesMut::with_capacity(len);
 
         // Fill bytes buffer
-        buffer.put_u16(len.try_into().unwrap());               // PDU Length
-        buffer.put_u8(7);                                      // Flag
-        buffer.put_u8(src_handle.len().try_into().unwrap());   // Src Handle Len
-        buffer.put(src_handle.as_bytes());                     // Src Handle
-        buffer.put_u8(dest_handle.len().try_into().unwrap());  // Dest Handle Len
-        buffer.put(dest_handle.as_bytes());                    // Dest Handle
-        buffer.put(message.as_bytes());                        // Message
+        buffer.put_u16(len.try_into().unwrap());                // PDU Length [2B]
+        buffer.put_u8(7);                                       // Flag [1B]
+        buffer.put_u8(src_handle.len().try_into().unwrap());    // Src Handle Len [1B]
+        buffer.put(src_handle.as_bytes());                      // Src Handle
+        buffer.put_u8(dest_handle.len().try_into().unwrap());   // Dest Handle Len [1B]
+        buffer.put(dest_handle.as_bytes());                     // Dest Handle
+        buffer.put(nonce);                                      // Nonce [12B]
+        buffer.put(ciphertext);                                 // Message
 
         MessagePDU { pdu: PDU { buffer }}
     }
@@ -142,10 +148,15 @@ impl MessagePDU {
         String::from_utf8_lossy(&self.pdu.buffer[start..end]).to_string()
     }
 
-    pub fn get_message(&self) -> String {
+    pub fn get_nonce(&self) -> &[u8] {
         let start = 5 + self.get_src_handle_len() + self.get_dest_handle_len();
+        let end = start + 12;
+        &self.pdu.buffer[start..end]
+    }
 
-        String::from_utf8_lossy(&self.pdu.buffer[start..]).to_string()
+    pub fn get_ciphertext(&self) -> &[u8] {
+        let start = 17 + self.get_src_handle_len() + self.get_dest_handle_len();
+        &self.pdu.buffer[start..]
     }
 }
 
@@ -183,7 +194,31 @@ impl Error for ClientDisconnectError {
     fn description(&self) -> &str {
        return "client disconnect";
     }
-} 
+}
+
+pub struct SessionInfo {
+    cipher: ChaCha20,
+    nonce_gen: ChaCha20Rng,
+}
+
+impl SessionInfo {
+    pub fn from_key(key: &[u8]) -> SessionInfo {
+        SessionInfo {
+            cipher: ChaCha20::new(Key::from_slice(key)),
+            nonce_gen: Seeder::from(key).make_rng(),
+        }
+    }
+
+    pub fn get_cipher(&self) -> &ChaCha20 {
+        &self.cipher
+    }
+
+    pub fn next_nonce(&mut self) -> Vec<u8> {
+        let mut nonce = [0u8; 12];
+        self.nonce_gen.fill(&mut nonce);
+        nonce.to_vec()
+    }
+}
 
 pub async fn read_pdu(client: &mut OwnedReadHalf) -> Result<BytesMut> {
     let mut len_buf: [u8; 2] = [0; 2];

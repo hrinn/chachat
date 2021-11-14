@@ -1,11 +1,11 @@
 use std::error::Error;
 use std::collections::HashMap;
-use std::sync::{Arc};
+use std::sync::Arc;
 use tokio::net::*;
 use tokio::net::tcp::OwnedWriteHalf;
-use futures::lock::Mutex;
 use tokio::sync::mpsc::{Sender, Receiver, channel};
 use tokio::io::{AsyncWriteExt};
+use futures::lock::Mutex;
 use chachat::*;
 
 type SenderMap = Arc<Mutex<HashMap<String, Sender<Vec<u8>>>>>;
@@ -79,12 +79,12 @@ async fn handle_pdus_from_client(client: &mut tcp::OwnedReadHalf, handle: &Strin
 }
 
 async fn handle_message(pdu: MessagePDU, channels: &SenderMap) {
-    println!("handling message: {:?}", pdu.get_message());
+    println!("{} -> {}: {}B", pdu.get_src_handle(), pdu.get_dest_handle(), pdu.get_ciphertext().len());
     let dest_handle = pdu.get_dest_handle();
     if let Some(tx) = channels.lock().await.get(&dest_handle) {
         tx.send(pdu.as_vec()).await.unwrap();
     } else {
-        println!("user {} is not logged in", dest_handle);
+        println!("User {} is not logged in", dest_handle);
     }
 }
 

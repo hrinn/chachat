@@ -1,9 +1,15 @@
 use std::error::Error;
+use std::io::Write;
+use std::sync::Arc;
+use futures::lock::Mutex;
 use tokio::net::TcpStream;
 use tokio::io::AsyncWriteExt;
-use std::io::Write;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use chacha20poly1305::{ChaCha20Poly1305 as ChaCha20, Key, Nonce};
+use chacha20poly1305::aead::{Aead, NewAead};
 use chachat::*;
+
+type AMCipher = Arc<Mutex<ChaCha20>>;
 
 pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<dyn Error + 'static>> {
     // Connect to server
@@ -26,17 +32,21 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
         return Ok(()); // TODO: Descriptive error
     } 
 
+    // Hard Coded Session Key
+    let key = Key::from_slice(b"Hayden Rinn Adam Perlin ChaChat!"); // 32B
+    let encrypt_cipher = Arc::new(Mutex::new(ChaCha20::new(key)));
+    let decrypt_cipher = Arc::clone(&encrypt_cipher);
 
     // Spawn a task for reading commands from user
     let input_task = tokio::spawn(async move {
-        handle_input_from_user(&handle_pdu.get_handle(), &mut write_server).await.unwrap_or_else(|e| {
+        handle_input_from_user(&handle_pdu.get_handle(), &mut write_server, encrypt_cipher).await.unwrap_or_else(|e| {
             eprintln!("error in user input task: {}", e)
         })
     });
 
     // Spawn a task for reading messages from server
     let read_task = tokio::spawn(async move {
-        handle_pdus_from_server(&mut read_server).await.unwrap_or_else(|e| {
+        handle_pdus_from_server(&mut read_server, decrypt_cipher).await.unwrap_or_else(|e| {
             eprintln!("error in message reader task: {}", e);
         })
     });
@@ -46,11 +56,12 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
     Ok(())
 }
 
-async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf) -> Result<(), Box<dyn Error>> {
+async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf, cipher: AMCipher) -> Result<(), Box<dyn Error>> {
     // Handle was accepted
     println!("Type /h for help");
     let usage = "COMMANDS:\n    /h - Help\n    /l - List users\n    \
     /s - Start session\n    /m - Send message\n    /e - Exit";
+
     // Parse commands from user
     loop {
         std::io::stdout().write_all("> ".as_bytes())?;
@@ -67,7 +78,7 @@ async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf) -> Re
         // split input into vectors of str slices
 
         match &input[0..2] {
-            "/m" | "/M" => send_message(handle, &input, server).await.unwrap(),
+            "/m" | "/M" => send_message(handle, &input, server, &cipher).await.unwrap(),
             "/s" | "/S" => eprintln!("Not implemented."),
             "/l" | "/L" => eprintln!("Not implemented."),
             "/h" | "/H" => println!("{}", usage),
@@ -77,7 +88,7 @@ async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf) -> Re
     }
 }
 
-async fn handle_pdus_from_server(server: &mut OwnedReadHalf) -> Result<(), Box<dyn Error>> {
+async fn handle_pdus_from_server(server: &mut OwnedReadHalf, cipher: AMCipher) -> Result<(), Box<dyn Error>> {
     loop {
         let buf = match read_pdu(server).await {
             Ok(buf) => buf,
@@ -85,36 +96,53 @@ async fn handle_pdus_from_server(server: &mut OwnedReadHalf) -> Result<(), Box<d
         };
 
         match get_flag_from_bytes(&buf) {
-            7 => display_message(MessagePDU::from_bytes(buf)).await?,
+            7 => display_message(MessagePDU::from_bytes(buf), &cipher).await?,
             _ => eprintln!("Not implemented."),
         }
     }
 }
 
-async fn send_message(handle: &str, buffer: &str, server: &mut OwnedWriteHalf) -> Result<(), Box<dyn Error>> {
-    if buffer.len() < 6 {
-        eprintln!("USAGE: /m <USER> <MESSAGE>");
+async fn send_message(handle: &str, buffer: &str, server: &mut OwnedWriteHalf, cipher: &AMCipher) -> Result<(), Box<dyn Error>> {
+    let message_usage = "USAGE: /m <USER> <MESSAGE>";
+    if buffer.len() < 3 {
+        eprintln!("{}", message_usage);
         return Ok(())
     }
     let buffer = &buffer[3..];
     let index = match buffer.find(' ') {
         Some(i) => i,
         None => {
-            eprintln!("USAGE: /m <USER> <MESSAGE>");
+            eprintln!("{}", message_usage);
             return Ok(())
         }
     };
 
     let (dest, message) = buffer.split_at(index);
-    let message = &message[1..];
-    let message_pdu = MessagePDU::new(handle, dest, message);
+    
+    let nonce = Nonce::from_slice(b"temp nonce!!");
+    let ciphertext = cipher.lock().await.encrypt(nonce, message[1..].as_ref())
+        .expect("Failed to encrypt user input!");
+    
+    let message_pdu = MessagePDU::new(handle, dest, nonce.as_slice(), &ciphertext);
     server.write_all( message_pdu.as_bytes()).await?;
 
     Ok(())
 }
 
-async fn display_message(pdu: MessagePDU) -> Result<(), tokio::task::JoinError> {
-    let out = format!("[{}]: {}\n> ", pdu.get_src_handle(), pdu.get_message());
+async fn display_message(pdu: MessagePDU, cipher: &AMCipher) -> Result<(), tokio::task::JoinError> {
+    let nonce = Nonce::from_slice(pdu.get_nonce());
+    // check if nonce
+
+    let out = match cipher.lock().await.decrypt(nonce, pdu.get_ciphertext().as_ref()) {
+        Ok(plaintext) => {
+            let message = String::from_utf8_lossy(&plaintext);
+            format!("{}: {}\n> ", pdu.get_src_handle(), message)
+        },
+        Err(_) => {
+            format!("Message from {} was modified in transit!", pdu.get_src_handle())
+        },
+    };
+
     let mut stdout = std::io::stdout();
     tokio::task::spawn_blocking(move || {
         stdout.write(out.as_bytes()).unwrap();
