@@ -182,6 +182,73 @@ impl HandleRespPDU {
     }
 }
 
+pub struct KeyExchangePDU {
+    pdu: PDU,
+}
+
+pdu_impl!(KeyExchangePDU);
+impl KeyExchangePDU {
+    pub fn new(src_handle: &str, dest_handle: &str, sig: &[u8], key: &[u8]) -> KeyExchangePDU {
+        let len = 3 + 1 + src_handle.len() + 1 + dest_handle.len() + 1 + sig.len() + key.len();
+
+        let mut buffer = BytesMut::with_capacity(len);
+
+        buffer.put_u16(len.try_into().unwrap());
+        buffer.put_u8(4);
+        buffer.put_u8(src_handle.len().try_into().unwrap());
+        buffer.put(src_handle.as_bytes());
+        buffer.put_u8(dest_handle.len().try_into().unwrap());
+        buffer.put(dest_handle.as_bytes());
+        buffer.put_u8(sig.len().try_into().unwrap());
+        buffer.put(sig);
+        buffer.put(key);
+
+        KeyExchangePDU { pdu: PDU {buffer }}
+    }
+
+    pub fn get_src_handle_len(&self) -> usize {
+        self.pdu.buffer[3].into()
+    }
+
+    pub fn get_src_handle(&self) -> String {
+        let start = 4;
+        let end = start + self.get_src_handle_len();
+
+        String::from_utf8_lossy(&self.pdu.buffer[start..end]).to_string()
+    }
+
+    pub fn get_dest_handle_len(&self) -> usize {
+        let src_handle_len = self.get_src_handle_len();
+        self.pdu.buffer[src_handle_len + 4].into()
+    }
+
+    pub fn get_dest_handle(&self) -> String {
+        let start = self.get_src_handle_len() + 5;
+        let end = start + self.get_dest_handle_len();
+
+        String::from_utf8_lossy(&self.pdu.buffer[start..end]).to_string()
+    }
+
+    pub fn get_signature_len(&self) -> usize {
+        let src_handle_len = self.get_src_handle_len();
+        let dest_handle_len = self.get_dest_handle_len();
+        self.pdu.buffer[5 + src_handle_len + dest_handle_len].into()
+    }
+
+    pub fn get_signature(&self) -> &[u8] {
+        let start = self.get_src_handle_len() + self.get_dest_handle_len() + 6;
+        let end = start + self.get_signature_len();
+        
+        &self.pdu.buffer[start..end]
+    }
+
+    pub fn get_key(&self) -> &[u8] {
+        let start = self.get_src_handle_len() + self.get_dest_handle_len() + self.get_signature_len() + 6;
+
+        &self.pdu.buffer[start..]
+    }
+}
+
 #[derive(Debug)]
 pub struct ClientDisconnectError;
 impl fmt::Display for ClientDisconnectError {

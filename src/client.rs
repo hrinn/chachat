@@ -2,16 +2,18 @@ use std::error::Error;
 use std::io::Write;
 use std::sync::Arc;
 use futures::lock::Mutex;
+use rand::SeedableRng;
 use tokio::net::TcpStream;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use chacha20poly1305::{ChaCha20Poly1305 as ChaCha20, Key, Nonce};
-use chacha20poly1305::aead::{Aead, NewAead};
+use chacha20poly1305::aead::{Aead, Key, NewAead};
 use chachat::*;
+use rand_chacha::ChaCha20Rng;
 
 type AMCipher = Arc<Mutex<ChaCha20>>;
 
-pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<dyn Error + 'static>> {
+pub async fn client(handle: &str, hostname: &str, port: u16, key_path: &str) -> Result<(), Box<dyn Error + 'static>> {
     // Connect to server
     let host = format!("{}:{}", hostname, port);
     println!("Connecting to {}", host);
@@ -32,14 +34,15 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
         return Ok(()); // TODO: Descriptive error
     } 
 
-    // Hard Coded Session Key
+    // Setup session key map
+    let session_key_generator = ChaCha20Rng::from_entropy();
     let key = Key::from_slice(b"Hayden Rinn Adam Perlin ChaChat!"); // 32B
     let encrypt_cipher = Arc::new(Mutex::new(ChaCha20::new(key)));
     let decrypt_cipher = Arc::clone(&encrypt_cipher);
 
     // Spawn a task for reading commands from user
     let input_task = tokio::spawn(async move {
-        handle_input_from_user(&handle_pdu.get_handle(), &mut write_server, encrypt_cipher).await.unwrap_or_else(|e| {
+        handle_input_from_user(&handle_pdu.get_handle(), &mut write_server, encrypt_cipher, session_key_generator).await.unwrap_or_else(|e| {
             eprintln!("error in user input task: {}", e)
         })
     });
@@ -56,7 +59,7 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
     Ok(())
 }
 
-async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf, cipher: AMCipher) -> Result<(), Box<dyn Error>> {
+async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf, cipher: AMCipher, key_gen: ChaCha20Rng) -> Result<(), Box<dyn Error>> {
     // Handle was accepted
     println!("Type /h for help");
     let usage = "COMMANDS:\n    /h - Help\n    /l - List users\n    \
@@ -73,13 +76,13 @@ async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf, ciphe
         }).await.unwrap();
         
         if input.len() < 2 {
+            eprintln!("Unknown command. Type /h for help")
             continue;
         }
-        // split input into vectors of str slices
 
         match &input[0..2] {
             "/m" | "/M" => send_message(handle, &input, server, &cipher).await.unwrap(),
-            "/s" | "/S" => eprintln!("Not implemented."),
+            "/s" | "/S" => initiate_session(handle, &input, server, &key_gen).await,
             "/l" | "/L" => eprintln!("Not implemented."),
             "/h" | "/H" => println!("{}", usage),
             "/e" | "/E" => return Ok(()),
@@ -109,15 +112,6 @@ async fn send_message(handle: &str, buffer: &str, server: &mut OwnedWriteHalf, c
         return Ok(())
     }
     let buffer = &buffer[3..];
-    let index = match buffer.find(' ') {
-        Some(i) => i,
-        None => {
-            eprintln!("{}", message_usage);
-            return Ok(())
-        }
-    };
-
-    let (dest, message) = buffer.split_at(index);
     
     let nonce = Nonce::from_slice(b"temp nonce!!");
     let ciphertext = cipher.lock().await.encrypt(nonce, message[1..].as_ref())
@@ -127,6 +121,37 @@ async fn send_message(handle: &str, buffer: &str, server: &mut OwnedWriteHalf, c
     server.write_all( message_pdu.as_bytes()).await?;
 
     Ok(())
+}
+
+async fn initiate_session(handle: &str, input: &str, server: &mut OwnedWriteHalf, key_gen: &ChaCha20Rng) {
+    // Parse user input
+    let session_usage = "USAGE: /s <USER> <PATH/TO/USER'S/PUBLIC/KEY>";
+    if input.len() < 3 {
+        eprintln!("{}", session_usage);
+    }
+    let input = &input[3..];
+    
+    let index = match input.find(' ') {
+        Some(i) => i,
+        None => {
+            eprintln!("{}", session_usage);
+            return Ok(())
+        }
+    };
+
+    let (dest, public_key_path) = buffer.split_at(index);
+
+    // Generate a session key
+    let mut key = [0u8; 32];
+    key_gen.fill(&mut key);
+
+    // Encrypt session key with dest's public key
+
+    // Encrypt handle with your private key
+
+    // Format packet
+
+    // Send
 }
 
 async fn display_message(pdu: MessagePDU, cipher: &AMCipher) -> Result<(), tokio::task::JoinError> {

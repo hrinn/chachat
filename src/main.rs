@@ -1,8 +1,10 @@
 extern crate clap;
 use clap::{Arg, App, SubCommand, ArgMatches};
 use std::process;
+use std::env;
 mod client;
 mod server;
+mod keygen;
 
 const DEFAULT_PORT: u16 = 3030;
 
@@ -27,18 +29,25 @@ async fn main() {
             .arg(Arg::with_name("port")
                 .value_name("PORT")
                 .help("Server's port")
-                .index(3)))   
+                .index(3))
+            .arg(Arg::with_name("key_path")
+                .value_name("KEY_PATH")
+                .help("Path to your private key")
+                .index(4)))   
         .subcommand(SubCommand::with_name("server")
             .about("Launches the ChaChat server")
             .arg(Arg::with_name("port")
                 .value_name("PORT")
                 .help("Server's port")
                 .index(1)))
+        .subcommand(SubCommand::with_name("keygen")
+            .about("Generates an RSA key to be used with ChaChat"))
             .get_matches();
 
     match app_m.subcommand() {
         ("client", Some(client_m)) => run_client(client_m).await,
         ("server", Some(server_m)) => run_server(server_m).await,
+        ("keygen", _) => run_keygen(),
         _ => println!("No subcommand was used"),
     }
 }
@@ -47,8 +56,13 @@ async fn run_client(matches: &ArgMatches<'_>) {
     let username = matches.value_of("username").unwrap();
     let hostname = matches.value_of("hostname").unwrap();
     let port = parse_port(matches.value_of("port"));
-    client::client(username, hostname, port).await.unwrap_or_else(|err| {
-        println!("Unable to run client: {}", err);
+    let default_key_path = format!("{}/.chachat/id_rsa", env::var("HOME").unwrap());
+    let key_path = match matches.value_of("key_path") {
+        Some(key_path) => key_path,
+        _ => &default_key_path,
+    };
+    client::client(username, hostname, port, key_path).await.unwrap_or_else(|err| {
+        println!("Client encountered error: {}", err);
         process::exit(1);
     });
 }
@@ -56,7 +70,7 @@ async fn run_client(matches: &ArgMatches<'_>) {
 async fn run_server(matches: &ArgMatches<'_>) {
     let port = parse_port(matches.value_of("port"));
     server::server(port).await.unwrap_or_else(|err| {
-        println!("Unable to run server: {}", err);
+        println!("Server encountered error: {}", err);
         process::exit(1);
     });
 }
@@ -66,4 +80,11 @@ fn parse_port(port: Option<&str>) -> u16 {
         Some(num) => num.parse().expect("Invalid port number"),
         _ => DEFAULT_PORT,
     }
+}
+
+fn run_keygen() {
+    keygen::keygen().unwrap_or_else(|err| {
+        println!("Error generating key: {}", err);
+        process::exit(1);
+    });
 }
