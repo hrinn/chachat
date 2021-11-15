@@ -1,7 +1,12 @@
 use std::convert::TryInto;
 use std::error::Error;
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
 use bytes::{BufMut, BytesMut};
+use rand::rngs::OsRng;
+use rsa::pkcs1::{FromRsaPrivateKey, FromRsaPublicKey};
+use rsa::{PaddingScheme, RsaPrivateKey, RsaPublicKey, PublicKey};
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::io::*;
 use chacha20poly1305::{ChaCha20Poly1305 as ChaCha20, Key};
@@ -9,6 +14,7 @@ use chacha20poly1305::aead::NewAead;
 use rand::prelude::*;
 use rand_chacha::ChaCha20Rng;
 use rand_seeder::Seeder;
+use sha2::{Sha256, Digest};
 
 pub struct PDU {
     buffer: BytesMut,
@@ -193,17 +199,24 @@ impl KeyExchangePDU {
 
         let mut buffer = BytesMut::with_capacity(len);
 
-        buffer.put_u16(len.try_into().unwrap());
-        buffer.put_u8(4);
-        buffer.put_u8(src_handle.len().try_into().unwrap());
-        buffer.put(src_handle.as_bytes());
-        buffer.put_u8(dest_handle.len().try_into().unwrap());
-        buffer.put(dest_handle.as_bytes());
-        buffer.put_u8(sig.len().try_into().unwrap());
-        buffer.put(sig);
-        buffer.put(key);
+        buffer.put_u16(len.try_into().unwrap());                // PDU Length
+        buffer.put_u8(4);                                       // Flag
+        buffer.put_u8(src_handle.len().try_into().unwrap());    // Src Handle Len
+        buffer.put(src_handle.as_bytes());                      // Src Handle
+        buffer.put_u8(dest_handle.len().try_into().unwrap());   // Dest Handle Len
+        buffer.put(dest_handle.as_bytes());                     // Dest Handle
+        buffer.put_u8(sig.len().try_into().unwrap());           // Signature Len
+        buffer.put(sig);                                        // Signature
+        buffer.put(key);                                        // Encrypted Key
 
-        KeyExchangePDU { pdu: PDU {buffer }}
+        let mut hasher = Sha256::new();                         
+        hasher.update(buffer.to_vec());
+        let digest = hasher.finalize(); // Create message digest
+
+        buffer.resize(len + 32, 0);     // Make space for the hash
+        buffer.put(digest.as_slice());  // Place hash of message
+
+        KeyExchangePDU { pdu: PDU { buffer }}
     }
 
     pub fn get_src_handle_len(&self) -> usize {
@@ -285,6 +298,46 @@ impl SessionInfo {
         self.nonce_gen.fill(&mut nonce);
         nonce.to_vec()
     }
+}
+
+pub struct RSAInfo {
+    private_key: RsaPrivateKey,
+    rng: OsRng,
+    session_key_gen: ChaCha20Rng,
+}
+
+impl RSAInfo {
+    pub fn new(key_str: &str) -> RSAInfo {
+        let private_key = RsaPrivateKey::from_pkcs1_pem(key_str).unwrap();
+        let rng = OsRng;
+        let session_key_gen = ChaCha20Rng::from_entropy();
+
+        RSAInfo { private_key, rng, session_key_gen }
+    }
+
+    pub fn sign(&mut self, data: &[u8]) -> Vec<u8> {
+        let padding = PaddingScheme::new_pkcs1v15_encrypt();
+        self.private_key.encrypt(&mut self.rng, padding, data).expect("Failed to RSA sign")
+    }
+
+    pub fn encrypt(&mut self, data: &[u8], key_str: &str) -> Vec<u8> {
+        let key = RsaPublicKey::from_pkcs1_pem(key_str).unwrap();
+        let padding = PaddingScheme::new_pkcs1v15_encrypt();
+        key.encrypt(&mut self.rng, padding, data).expect("Failed to RSA encrypt")
+    }
+
+    pub fn generate_session_key(&mut self) -> Vec<u8> {
+        let mut key = [0u8; 32];
+        self.session_key_gen.fill(&mut key);
+        key.to_vec()
+    }
+}
+
+pub fn key_path_to_str(key_path: &str) -> Result<String> {
+    let mut file = File::open(key_path)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
 }
 
 pub async fn read_pdu(client: &mut OwnedReadHalf) -> Result<BytesMut> {
