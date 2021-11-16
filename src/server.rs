@@ -53,7 +53,12 @@ pub async fn server(port: u16) -> Result<(), Box<dyn Error>> {
 }
 
 async fn send_handle_response(client: &mut OwnedWriteHalf, accepted: bool) {
-    let pdu = HandleRespPDU::new(accepted);
+    let flag: u8 = if accepted {
+        2
+    } else {
+        3
+    };
+    let pdu = FlagOnlyPDU::new(flag);
     client.write_all(pdu.as_bytes()).await.unwrap_or_else(|e| {
         eprintln!("error sending handle response to client: {:?}", e);
     });
@@ -89,12 +94,18 @@ async fn handle_session_init(pdu: KeyExchangePDU, channels: &SenderMap) {
     forward_pdu(&pdu.get_dest_handle(), &pdu.get_src_handle(), pdu.as_vec(), channels).await;
 }
 
-async fn forward_pdu(dest: &str, _src: &str, pdu: Vec<u8>, channels: &SenderMap) {
+async fn forward_pdu(dest: &str, src: &str, pdu: Vec<u8>, channels: &SenderMap) {
     if let Some(tx) = channels.lock().await.get(dest) {
         tx.send(pdu).await.unwrap();
+        return;
+    }
+
+    println!("User {} is not logged in", dest);
+    let pdu = FlagOnlyPDU::new(8);
+    if let Some(my_tx) = channels.lock().await.get(src) {
+        my_tx.send(pdu.as_vec()).await.unwrap(); // Send no recipient PDU back to client
     } else {
-        println!("User {} is not logged in", dest);
-        // Send packet to src to let them know that someone is not logged in
+        panic!("{} is not in session map", src);
     }
 }
 

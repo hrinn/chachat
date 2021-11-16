@@ -166,25 +166,17 @@ impl MessagePDU {
     }
 }
 
-pub struct HandleRespPDU {
+pub struct FlagOnlyPDU {
     pdu: PDU,
 }
 
-pdu_impl!(HandleRespPDU);
-impl HandleRespPDU {
-    pub fn new(accept: bool) -> HandleRespPDU {
+pdu_impl!(FlagOnlyPDU);
+impl FlagOnlyPDU {
+    pub fn new(flag: u8) -> FlagOnlyPDU {
         let mut buffer = BytesMut::with_capacity(3);
         buffer.put_u16(3);
-        if accept {
-            buffer.put_u8(2);
-        } else {
-            buffer.put_u8(3);
-        }
-        HandleRespPDU { pdu: PDU { buffer }}
-    }
-
-    pub fn is_accept(&self) -> bool {
-        self.pdu.buffer[2] == 2
+        buffer.put_u8(flag);
+        FlagOnlyPDU { pdu: PDU { buffer }}
     }
 }
 

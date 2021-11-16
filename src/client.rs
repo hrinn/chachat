@@ -29,8 +29,7 @@ pub async fn client(handle: &str, hostname: &str, port: u16, key_path: &str) -> 
 
     // Read server's response
     let handle_resp_bytes = read_pdu(&mut read_server).await?;
-    let handle_resp_pdu = HandleRespPDU::from_bytes(handle_resp_bytes);
-    if !handle_resp_pdu.is_accept() {
+    if get_flag_from_bytes(&handle_resp_bytes) == 3 {
         // Handle was rejected
         println!("Handle {} is already in use", handle);
         return Ok(()); // TODO: Descriptive error
@@ -48,20 +47,20 @@ pub async fn client(handle: &str, hostname: &str, port: u16, key_path: &str) -> 
     let nonce_gen = ChaCha20Rng::from_entropy();
 
     // Spawn a task for reading commands from user
-    let input_task = tokio::spawn(async move {
+    let stdio_reader = tokio::spawn(async move {
         handle_input_from_user(&handle_pdu.get_handle(), &mut write_server, sessions, rsa_info, nonce_gen).await.unwrap_or_else(|e| {
             eprintln!("error in user input task: {}", e)
         })
     });
 
     // Spawn a task for reading messages from server
-    let read_task = tokio::spawn(async move {
+    let server_reader = tokio::spawn(async move {
         handle_pdus_from_server(&mut read_server, sessions_clone, rsa_info_clone).await.unwrap_or_else(|e| {
             eprintln!("error in message reader task: {}", e);
         })
     });
 
-    tokio::try_join!(input_task, read_task)?;
+    tokio::try_join!(stdio_reader, server_reader)?;
 
     Ok(())
 }
@@ -196,8 +195,9 @@ async fn handle_pdus_from_server(server: &mut OwnedReadHalf, sessions: SessionsM
         };
 
         match get_flag_from_bytes(&buf) {
-            7 => display_message(MessagePDU::from_bytes(buf), &sessions).await?,
             4 => handle_session(server, KeyExchangePDU::from_bytes(buf), &sessions, &rsa_info).await,
+            7 => display_message(MessagePDU::from_bytes(buf), &sessions).await?,
+            8 => println!("User is not logged in.\n> "), // Remove them from the sessions if one is active
             _ => eprintln!("Not implemented."),
         }
     }
