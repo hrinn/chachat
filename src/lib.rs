@@ -195,7 +195,8 @@ pub struct KeyExchangePDU {
 pdu_impl!(KeyExchangePDU);
 impl KeyExchangePDU {
     pub fn new(src_handle: &str, dest_handle: &str, sig: &[u8], key: &[u8]) -> KeyExchangePDU {
-        let len = 3 + 1 + src_handle.len() + 1 + dest_handle.len() + 1 + sig.len() + key.len();
+
+        let len = 3 + 1 + src_handle.len() + 1 + dest_handle.len() + 1 + sig.len() + key.len() + 32;
 
         let mut buffer = BytesMut::with_capacity(len);
         let sig_block_size = sig.len() / 256;
@@ -212,10 +213,8 @@ impl KeyExchangePDU {
 
         let mut hasher = Sha256::new();                         
         hasher.update(buffer.to_vec());
-        let digest = hasher.finalize(); // Create message digest
-
-        buffer.resize(len + 32, 0);     // Make space for the hash
-        buffer.put(digest.as_slice());  // Place hash of message
+        let digest = hasher.finalize();
+        buffer.put(digest.as_slice());
 
         KeyExchangePDU { pdu: PDU { buffer }}
     }
@@ -369,6 +368,7 @@ pub async fn read_pdu(client: &mut OwnedReadHalf) -> Result<BytesMut> {
     client.read_exact(&mut len_buf).await?;
 
     let len = u16::from_be_bytes(len_buf);
+
     // Read the remaining bytes of the PDU.
     let rem_len: usize = (len-2).into();
     let mut rem_buf = vec![0u8; rem_len]; 
