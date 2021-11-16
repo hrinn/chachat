@@ -3,17 +3,17 @@ use std::error::Error;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
+use std::env;
 use bytes::{BufMut, BytesMut};
 use rand::rngs::OsRng;
+use rand_chacha::ChaCha20Rng;
+use rand::prelude::*;
 use rsa::pkcs1::{FromRsaPrivateKey, FromRsaPublicKey};
 use rsa::{PaddingScheme, RsaPrivateKey, RsaPublicKey, PublicKey};
 use tokio::net::tcp::OwnedReadHalf;
 use tokio::io::*;
 use chacha20poly1305::{ChaCha20Poly1305 as ChaCha20, Key};
 use chacha20poly1305::aead::NewAead;
-use rand::prelude::*;
-use rand_chacha::ChaCha20Rng;
-use rand_seeder::Seeder;
 use sha2::{Sha256, Digest};
 
 pub struct PDU {
@@ -198,6 +198,7 @@ impl KeyExchangePDU {
         let len = 3 + 1 + src_handle.len() + 1 + dest_handle.len() + 1 + sig.len() + key.len();
 
         let mut buffer = BytesMut::with_capacity(len);
+        let sig_block_size = sig.len() / 256;
 
         buffer.put_u16(len.try_into().unwrap());                // PDU Length
         buffer.put_u8(4);                                       // Flag
@@ -205,7 +206,7 @@ impl KeyExchangePDU {
         buffer.put(src_handle.as_bytes());                      // Src Handle
         buffer.put_u8(dest_handle.len().try_into().unwrap());   // Dest Handle Len
         buffer.put(dest_handle.as_bytes());                     // Dest Handle
-        buffer.put_u8(sig.len().try_into().unwrap());           // Signature Len
+        buffer.put_u8(sig_block_size.try_into().unwrap());      // Signature Len (blocks of 256B)
         buffer.put(sig);                                        // Signature
         buffer.put(key);                                        // Encrypted Key
 
@@ -245,7 +246,8 @@ impl KeyExchangePDU {
     pub fn get_signature_len(&self) -> usize {
         let src_handle_len = self.get_src_handle_len();
         let dest_handle_len = self.get_dest_handle_len();
-        self.pdu.buffer[5 + src_handle_len + dest_handle_len].into()
+        let blocksize: usize = self.pdu.buffer[5 + src_handle_len + dest_handle_len].into();
+        return blocksize * 256;
     }
 
     pub fn get_signature(&self) -> &[u8] {
@@ -278,25 +280,17 @@ impl Error for ClientDisconnectError {
 
 pub struct SessionInfo {
     cipher: ChaCha20,
-    nonce_gen: ChaCha20Rng,
 }
 
 impl SessionInfo {
     pub fn from_key(key: &[u8]) -> SessionInfo {
         SessionInfo {
             cipher: ChaCha20::new(Key::from_slice(key)),
-            nonce_gen: Seeder::from(key).make_rng(),
         }
     }
 
     pub fn get_cipher(&self) -> &ChaCha20 {
         &self.cipher
-    }
-
-    pub fn next_nonce(&mut self) -> Vec<u8> {
-        let mut nonce = [0u8; 12];
-        self.nonce_gen.fill(&mut nonce);
-        nonce.to_vec()
     }
 }
 
@@ -315,15 +309,44 @@ impl RSAInfo {
         RSAInfo { private_key, rng, session_key_gen }
     }
 
+    // Hash with SHA256 and encrypt with my private key
     pub fn sign(&mut self, data: &[u8]) -> Vec<u8> {
-        let padding = PaddingScheme::new_pkcs1v15_encrypt();
-        self.private_key.encrypt(&mut self.rng, padding, data).expect("Failed to RSA sign")
+        let padding = PaddingScheme::new_pkcs1v15_sign(Some(rsa::Hash::SHA2_256));
+
+        // Hash data with Sha256
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let digest = hasher.finalize();
+
+        // Sign with private key
+        self.private_key.sign(padding, &digest).expect("Failed to RSA sign")
     }
 
+    // Encrypt with other's public key
     pub fn encrypt(&mut self, data: &[u8], key_str: &str) -> Vec<u8> {
-        let key = RsaPublicKey::from_pkcs1_pem(key_str).unwrap();
+        let public_key = RsaPublicKey::from_pkcs1_pem(key_str).unwrap();
         let padding = PaddingScheme::new_pkcs1v15_encrypt();
-        key.encrypt(&mut self.rng, padding, data).expect("Failed to RSA encrypt")
+        public_key.encrypt(&mut self.rng, padding, data).expect("Failed to RSA encrypt")
+    }
+
+    // Decrypt with my private key
+    pub fn decrypt(&mut self, ciphertext: &[u8]) -> Vec<u8> {
+        let padding = PaddingScheme::new_pkcs1v15_encrypt();
+        self.private_key.decrypt(padding, ciphertext).expect("Failed to RSA decrypt")
+    }
+
+    // Decrypt with other's public key
+    pub fn verify(&mut self, sig: &[u8], expected: &str, key_str: &str) -> std::result::Result<(), rsa::errors::Error> {
+        let public_key = RsaPublicKey::from_pkcs1_pem(key_str).unwrap();
+        let padding = PaddingScheme::new_pkcs1v15_sign(Some(rsa::Hash::SHA2_256));
+
+        // Hash expected
+        let mut hasher = Sha256::new();
+        hasher.update(expected);
+        let digest = hasher.finalize();
+
+        // Verify hash with public key
+        public_key.verify(padding, &digest, sig)
     }
 
     pub fn generate_session_key(&mut self) -> Vec<u8> {
@@ -334,7 +357,8 @@ impl RSAInfo {
 }
 
 pub fn key_path_to_str(key_path: &str) -> Result<String> {
-    let mut file = File::open(key_path)?;
+    let key_path = expand_tilde(key_path);
+    let mut file = File::open(&key_path)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
     Ok(contents)
@@ -361,4 +385,18 @@ pub async fn read_pdu(client: &mut OwnedReadHalf) -> Result<BytesMut> {
 
 pub fn get_flag_from_bytes(bytes: &BytesMut) -> u8 {
     bytes[2]
+}
+
+// Replaces ~'s in a path with the user's home directory
+pub fn expand_tilde(path: &str) -> String {
+    // Find location of ~ and split string
+    let i = match path.find('~') {
+        Some(i) => i,
+        None => return path.to_string(),
+    };
+
+    let p1 = &path[..i];
+    let p2 = &path[i+1..];
+
+    format!("{}{}{}", p1, env::var("HOME").unwrap(), p2)
 }

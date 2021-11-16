@@ -7,6 +7,8 @@ use rsa::{RsaPrivateKey, RsaPublicKey};
 use rsa::pkcs1::{ToRsaPrivateKey, ToRsaPublicKey};
 use rand::rngs::OsRng;
 
+use chachat::expand_tilde;
+
 pub fn keygen() -> Result<(), Box<dyn Error>> {
     let default_path = format!("{}/.chachat/id_rsa", env::var("HOME")?);
     println!("Enter file in which to save the key ({}):", default_path);
@@ -15,13 +17,13 @@ pub fn keygen() -> Result<(), Box<dyn Error>> {
     let mut private_key_path = String::new();
     io::stdin().read_line(&mut private_key_path)?;
     let private_key_path = match private_key_path.trim() {
-        "" => &default_path,
-        path => path,
+        "" => default_path,
+        path => expand_tilde(path),
     };
     let public_key_path = format!("{}.pub", private_key_path);
 
     let public_key_path = Path::new(&public_key_path);
-    let private_key_path = Path::new(private_key_path);
+    let private_key_path = Path::new(&private_key_path);
 
     // Generate the RSA keys
     println!("Generating key...");

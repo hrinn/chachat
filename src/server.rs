@@ -72,6 +72,7 @@ async fn handle_pdus_from_client(client: &mut tcp::OwnedReadHalf, handle: &Strin
         };
 
         match get_flag_from_bytes(&buf) {
+            4 => handle_session_init(KeyExchangePDU::from_bytes(buf), &channels).await,
             7 => handle_message(MessagePDU::from_bytes(buf), &channels).await,
             _ => unreachable!()
         }
@@ -80,11 +81,20 @@ async fn handle_pdus_from_client(client: &mut tcp::OwnedReadHalf, handle: &Strin
 
 async fn handle_message(pdu: MessagePDU, channels: &SenderMap) {
     println!("{} -> {}: {}B", pdu.get_src_handle(), pdu.get_dest_handle(), pdu.get_ciphertext().len());
-    let dest_handle = pdu.get_dest_handle();
-    if let Some(tx) = channels.lock().await.get(&dest_handle) {
-        tx.send(pdu.as_vec()).await.unwrap();
+    forward_pdu(&pdu.get_dest_handle(), &pdu.get_src_handle(), pdu.as_vec(), channels).await;
+}
+
+async fn handle_session_init(pdu: KeyExchangePDU, channels: &SenderMap) {
+    println!("{} -> {}: Propose session", pdu.get_src_handle(), pdu.get_dest_handle());
+    forward_pdu(&pdu.get_dest_handle(), &pdu.get_src_handle(), pdu.as_vec(), channels).await;
+}
+
+async fn forward_pdu(dest: &str, _src: &str, pdu: Vec<u8>, channels: &SenderMap) {
+    if let Some(tx) = channels.lock().await.get(dest) {
+        tx.send(pdu).await.unwrap();
     } else {
-        println!("User {} is not logged in", dest_handle);
+        println!("User {} is not logged in", dest);
+        // Send packet to src to let them know that someone is not logged in
     }
 }
 

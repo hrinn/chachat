@@ -7,7 +7,10 @@ use tokio::net::TcpStream;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use chacha20poly1305::Nonce;
-use chacha20poly1305::aead::{Aead, NewAead};
+use chacha20poly1305::aead::Aead;
+use rand_chacha::ChaCha20Rng;
+use rand::Rng;
+use rand::SeedableRng;
 use chachat::*;
 
 type SessionsMap = Arc<Mutex<HashMap<String, SessionInfo>>>;
@@ -41,9 +44,12 @@ pub async fn client(handle: &str, hostname: &str, port: u16, key_path: &str) -> 
     let sessions: SessionsMap = Arc::new(Mutex::new(HashMap::new()));
     let sessions_clone = Arc::clone(&sessions);
 
+    // Setup Nonce generator
+    let nonce_gen = ChaCha20Rng::from_entropy();
+
     // Spawn a task for reading commands from user
     let input_task = tokio::spawn(async move {
-        handle_input_from_user(&handle_pdu.get_handle(), &mut write_server, sessions, rsa_info).await.unwrap_or_else(|e| {
+        handle_input_from_user(&handle_pdu.get_handle(), &mut write_server, sessions, rsa_info, nonce_gen).await.unwrap_or_else(|e| {
             eprintln!("error in user input task: {}", e)
         })
     });
@@ -60,21 +66,18 @@ pub async fn client(handle: &str, hostname: &str, port: u16, key_path: &str) -> 
     Ok(())
 }
 
-async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf, sessions: SessionsMap, rsa_info: Arc<Mutex<RSAInfo>>) -> Result<(), Box<dyn Error>> {
+async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf, sessions: SessionsMap, rsa_info: Arc<Mutex<RSAInfo>>, mut nonce_gen: ChaCha20Rng) -> Result<(), Box<dyn Error>> {
     // Handle was accepted
     println!("Type /h for help");
-    let usage = "COMMANDS:\n    /h - Help\n    /l - List users\n    \
-    /s - Start session\n    /m - Send message\n    /e - Exit";
+    let usage = "COMMANDS:\n    /h - Help\n    /u - List users\n    \
+        /l - List sessions\n    /s - Start session\n    \
+        /m - Send message\n    /e - Exit";
 
     // Parse commands from user
     loop {
         std::io::stdout().write_all("> ".as_bytes())?;
         std::io::stdout().flush()?;
-        let input = tokio::task::spawn_blocking(|| {
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input).unwrap();
-            return input.trim().to_string();
-        }).await.unwrap();
+        let input = stdin_readline().await;
         
         if input.len() < 2 {
             eprintln!("Unknown command. Type /h for help");
@@ -82,9 +85,10 @@ async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf, sessi
         }
 
         match &input[0..2] {
-            "/m" | "/M" => send_message(handle, &input, server, &sessions).await.unwrap(),
+            "/m" | "/M" => send_message(handle, &input, server, &sessions, &mut nonce_gen).await.unwrap(),
             "/s" | "/S" => initiate_session(handle, &input, server, &sessions, &rsa_info).await,
-            "/l" | "/L" => eprintln!("Not implemented."),
+            "/l" | "/L" => list_sessions(&sessions).await,
+            "/u" | "/U" => eprintln!("Not implemented."),
             "/h" | "/H" => println!("{}", usage),
             "/e" | "/E" => return Ok(()),
             _ => eprintln!("Unknown command. Type /h for help"),
@@ -92,21 +96,15 @@ async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf, sessi
     }
 }
 
-async fn handle_pdus_from_server(server: &mut OwnedReadHalf, sessions: SessionsMap, rsa_info: Arc<Mutex<RSAInfo>>) -> Result<(), Box<dyn Error>> {
-    loop {
-        let buf = match read_pdu(server).await {
-            Ok(buf) => buf,
-            Err(_) => return Ok(()), // Client disconnected, end this task
-        };
-
-        match get_flag_from_bytes(&buf) {
-            7 => display_message(MessagePDU::from_bytes(buf), &sessions).await?,
-            _ => eprintln!("Not implemented."),
-        }
-    }
+async fn stdin_readline() -> String {
+    tokio::task::spawn_blocking(|| {
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input).unwrap();
+        return input.trim().to_string();
+    }).await.expect("Failed to read line from stdin")
 }
 
-async fn send_message(handle: &str, input: &str, server: &mut OwnedWriteHalf, sessions: &SessionsMap) -> Result<(), Box<dyn Error>> {
+async fn send_message(handle: &str, input: &str, server: &mut OwnedWriteHalf, sessions: &SessionsMap, nonce_gen: &mut ChaCha20Rng) -> Result<(), Box<dyn Error>> {
     let message_usage = "USAGE: /m <USER> <MESSAGE>";
     if input.len() < 3 {
         eprintln!("{}", message_usage);
@@ -129,7 +127,7 @@ async fn send_message(handle: &str, input: &str, server: &mut OwnedWriteHalf, se
         return Ok(())
     }
 
-    let nonce = sessions.lock().await.get(dest).unwrap().next_nonce(); // next nonce mutates self and thats bad
+    let nonce = generate_nonce(nonce_gen);
     let ciphertext = sessions.lock().await.get(dest).unwrap()
         .get_cipher()
         .encrypt(Nonce::from_slice(&nonce), message[1..].as_ref())
@@ -170,26 +168,77 @@ async fn initiate_session(handle: &str, input: &str, server: &mut OwnedWriteHalf
     sessions.lock().await.insert(dest.to_string(), SessionInfo::from_key(&key));
 
     // Encrypt session key with dest's public key
-    let key_str = key_path_to_str(&public_key_path).unwrap_or_else(|| {
-        eprintln!("Invalid path to {}'s public key", dest);
-        return;
-    });
-    let encrypted_key = rsa_info.lock().await.encrypt(&key, key_str);
+    let key_str = key_path_to_str(&public_key_path).expect("Invalid path to public key");
+    let encrypted_key = rsa_info.lock().await.encrypt(&key, &key_str);
 
     // Sign handle with your private key
-    let signature = rsa_info.lock().await.sign(handle);
+    let signature = rsa_info.lock().await.sign(handle.as_bytes());
 
     // Send packet
-    let pdu = KeyExchangePDU::new(handle, dest, signature, encrypted_key);
-    server.write_all(pdu.as_bytes());
+    let pdu = KeyExchangePDU::new(handle, dest, &signature, &encrypted_key);
+    server.write_all(pdu.as_bytes()).await.unwrap();
+
+    // Await session response
 }
+
+async fn list_sessions(sessions: &SessionsMap) {
+    println!("Active sessions:");
+    for user in sessions.lock().await.keys() {
+        println!("    {}", user);
+    }
+}
+
+async fn handle_pdus_from_server(server: &mut OwnedReadHalf, sessions: SessionsMap, rsa_info: Arc<Mutex<RSAInfo>>) -> Result<(), Box<dyn Error>> {
+    loop {
+        let buf = match read_pdu(server).await {
+            Ok(buf) => buf,
+            Err(_) => return Ok(()), // Client disconnected, end this task
+        };
+
+        match get_flag_from_bytes(&buf) {
+            7 => display_message(MessagePDU::from_bytes(buf), &sessions).await?,
+            4 => handle_session(server, KeyExchangePDU::from_bytes(buf), &sessions, &rsa_info).await,
+            _ => eprintln!("Not implemented."),
+        }
+    }
+}
+
+async fn handle_session(_server: &mut OwnedReadHalf, pdu: KeyExchangePDU, _sessions: &SessionsMap, _rsa_info: &Arc<Mutex<RSAInfo>>) {
+    loop {
+        println!("\n{} would like to initiate a session. Accept? (y)/n:", pdu.get_src_handle());
+        match stdin_readline().await.as_str() {
+            "y" => break,
+            "n" => {
+                // send_session_reject(server, &pdu.get_dest_handle(), &pdu.get_src_handle());
+                return;
+            },
+            _ => continue,
+        };
+    }
+
+    println!("Enter the path to {}'s public key:", pdu.get_src_handle());
+    let _key_path = stdin_readline().await;
+
+
+    // Send accept packet back
+    // send_session_accept(server, &pdu.get_src_handle(), &pdu.get_dest_handle(), rsa_info);
+
+}
+
+// async fn send_session_reject(server: &mut OwnedReadHalf, src_handle: &str, dest_handle: &str) {
+
+// }
+
+// async fn send_session_accept(server: &mut OwnedReadHalf, src_handle: &str, dest_handle: &str, rsa_info: &Arc<Mutex<RSAInfo>>) {
+
+// }
 
 async fn display_message(pdu: MessagePDU, sessions: &SessionsMap) -> Result<(), tokio::task::JoinError> {
     let nonce = Nonce::from_slice(pdu.get_nonce());
-    let session = sessions.lock().await.get(pdu.get_src_handle())
-        .expect("Received a message from a user you do not have a session with!");
 
-    let out = match session.get_cipher().decrypt(nonce, pdu.get_ciphertext().as_ref()) {
+    let out = match sessions.lock().await.get(&pdu.get_src_handle())
+        .expect("Received a message from a user you do not have a session with!")
+        .get_cipher().decrypt(nonce, pdu.get_ciphertext().as_ref()) {
         Ok(plaintext) => {
             let message = String::from_utf8_lossy(&plaintext);
             format!("{}: {}\n> ", pdu.get_src_handle(), message)
@@ -204,4 +253,10 @@ async fn display_message(pdu: MessagePDU, sessions: &SessionsMap) -> Result<(), 
         stdout.write(out.as_bytes()).unwrap();
         stdout.flush().unwrap();
     }).await
+}
+
+fn generate_nonce(nonce_gen: &mut ChaCha20Rng) -> Vec<u8> {
+    let mut nonce = [0u8; 12];
+    nonce_gen.fill(&mut nonce);
+    nonce.to_vec()
 }

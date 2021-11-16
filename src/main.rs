@@ -5,6 +5,7 @@ use std::env;
 mod client;
 mod server;
 mod keygen;
+use chachat::expand_tilde;
 
 const DEFAULT_PORT: u16 = 3030;
 
@@ -58,10 +59,10 @@ async fn run_client(matches: &ArgMatches<'_>) {
     let port = parse_port(matches.value_of("port"));
     let default_key_path = format!("{}/.chachat/id_rsa", env::var("HOME").unwrap());
     let key_path = match matches.value_of("key_path") {
-        Some(key_path) => key_path,
-        _ => &default_key_path,
+        Some(key_path) => expand_tilde(key_path),
+        _ => default_key_path,
     };
-    client::client(username, hostname, port, key_path).await.unwrap_or_else(|err| {
+    client::client(username, hostname, port, &key_path).await.unwrap_or_else(|err| {
         println!("Client encountered error: {}", err);
         process::exit(1);
     });
