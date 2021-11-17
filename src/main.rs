@@ -30,11 +30,7 @@ async fn main() {
             .arg(Arg::with_name("port")
                 .value_name("PORT")
                 .help("Server's port")
-                .index(3))
-            .arg(Arg::with_name("key_path")
-                .value_name("KEY_PATH")
-                .help("Path to your private key")
-                .index(4)))   
+                .index(3)))   
         .subcommand(SubCommand::with_name("server")
             .about("Launches the ChaChat server")
             .arg(Arg::with_name("port")
@@ -57,12 +53,8 @@ async fn run_client(matches: &ArgMatches<'_>) {
     let username = matches.value_of("username").unwrap();
     let hostname = matches.value_of("hostname").unwrap();
     let port = parse_port(matches.value_of("port"));
-    let default_key_path = format!("{}/.chachat/id_rsa", env::var("HOME").unwrap());
-    let key_path = match matches.value_of("key_path") {
-        Some(key_path) => expand_tilde(key_path),
-        _ => default_key_path,
-    };
-    client::client(username, hostname, port, &key_path).await.unwrap_or_else(|err| {
+
+    client::client(username, hostname, port).await.unwrap_or_else(|err| {
         println!("Client encountered error: {}", err);
         process::exit(1);
     });

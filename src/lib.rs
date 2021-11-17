@@ -206,7 +206,7 @@ impl KeyExchangePDU {
         let mut hasher = Sha256::new();                         
         hasher.update(buffer.to_vec());
         let digest = hasher.finalize();
-        buffer.put(digest.as_slice());
+        buffer.put(digest.as_slice());                          // Hash
 
         KeyExchangePDU { pdu: PDU { buffer }}
     }
@@ -250,8 +250,24 @@ impl KeyExchangePDU {
 
     pub fn get_key(&self) -> &[u8] {
         let start = self.get_src_handle_len() + self.get_dest_handle_len() + self.get_signature_len() + 6;
+        let end = self.len() - 32;
+
+        &self.pdu.buffer[start..end]
+    }
+
+    pub fn get_hash(&self) -> &[u8] {
+        let start = self.len() - 32;
 
         &self.pdu.buffer[start..]
+    }
+
+    pub fn check_hash(&self) -> bool {
+        // Compute hash
+        let mut hasher = Sha256::new();
+        hasher.update(self.buffer[..self.len() - 32]);
+        let digest = hasher.finalize();
+
+        digest == self.get
     }
 }
 
@@ -292,12 +308,12 @@ pub struct RSAInfo {
 }
 
 impl RSAInfo {
-    pub fn new(key_str: &str) -> RSAInfo {
-        let private_key = RsaPrivateKey::from_pkcs1_pem(key_str).unwrap();
+    pub fn new(key_str: &str) -> Result<RSAInfo> {
+        let private_key = RsaPrivateKey::from_pkcs1_pem(key_str)?;
         let rng = OsRng;
         let session_key_gen = ChaCha20Rng::from_entropy();
 
-        RSAInfo { private_key, rng, session_key_gen }
+        Ok(RSAInfo { private_key, rng, session_key_gen })
     }
 
     // Hash with SHA256 and encrypt with my private key
@@ -328,7 +344,7 @@ impl RSAInfo {
 
     // Decrypt with other's public key
     pub fn verify(&mut self, sig: &[u8], expected: &str, key_str: &str) -> std::result::Result<(), rsa::errors::Error> {
-        let public_key = RsaPublicKey::from_pkcs1_pem(key_str).unwrap();
+        let public_key = RsaPublicKey::from_pkcs1_pem(key_str)?;
         let padding = PaddingScheme::new_pkcs1v15_sign(Some(rsa::Hash::SHA2_256));
 
         // Hash expected
@@ -392,3 +408,5 @@ pub fn expand_tilde(path: &str) -> String {
 
     format!("{}{}{}", p1, env::var("HOME").unwrap(), p2)
 }
+
+// Asynchronously polls two channels

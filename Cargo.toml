@@ -13,8 +13,6 @@ description = "An encrypted messaging program for the command line"
 [dependencies]
 clap = "2.33.3"
 bytes = "1.1.0"
-mio = "0.6.23"
-mio-extras = "2.0.6"
 futures = "0.3"
 tokio = { version = "1", features = ["full", "io-util"] }
 chacha20poly1305 = "0.9.0"
