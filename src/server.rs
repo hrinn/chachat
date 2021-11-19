@@ -91,7 +91,7 @@ async fn forward_pdu(pdu: ForwardPDU, channels: &SenderMap) {
         return;
     }
 
-    println!("User {} is not logged in", pdu.get_dest_handle());
+    println!("{} is not logged in", pdu.get_dest_handle());
     let resp_pdu = FlagOnlyPDU::new(8);
     if let Some(my_tx) = channels.lock().await.get(&pdu.get_src_handle()) {
         my_tx.send(resp_pdu.as_vec()).await.unwrap(); // Send no recipient PDU back to client

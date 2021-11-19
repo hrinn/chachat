@@ -73,7 +73,10 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
         write_to_server(&mut write_server, rx).await;
     });
 
-    tokio::try_join!(stdio_handler, server_handler, server_writer)?;
+    // Wait for tasks to end / kill them
+    stdio_handler.await?;
+    server_handler.abort();
+    server_writer.await?;
 
     Ok(())
 }
