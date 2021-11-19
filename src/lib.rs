@@ -15,6 +15,7 @@ use tokio::io::*;
 use chacha20poly1305::{ChaCha20Poly1305 as ChaCha20, Key};
 use chacha20poly1305::aead::NewAead;
 use sha2::{Sha256, Digest};
+use std::result::Result;
 
 pub struct PDU {
     buffer: BytesMut,
@@ -46,6 +47,75 @@ macro_rules! pdu_impl {
             // Returns a vector representation of the buffer
             pub fn as_vec(&self) -> Vec<u8> {
                 self.pdu.as_vec()
+            }
+        }
+    }
+}
+
+macro_rules! handle_impl {
+    ($t:ident) => {
+        impl $t {
+            // Gets the length of the source handle from the buffer
+            pub fn get_src_handle_len(&self) -> usize {
+                self.pdu.buffer[3].into()
+            }
+        
+            // Gets the source handle from the buffer
+            pub fn get_src_handle(&self) -> String {
+                let start = 4;
+                let end = start + self.get_src_handle_len();
+        
+                String::from_utf8_lossy(&self.pdu.buffer[start..end]).to_string()
+            }
+            
+            // Gets the length of the dest handle from the buffer
+            pub fn get_dest_handle_len(&self) -> usize {
+                let src_handle_len = self.get_src_handle_len();
+                self.pdu.buffer[src_handle_len + 4].into()
+            }
+            
+            // Gets the dest handle from the buffer
+            pub fn get_dest_handle(&self) -> String {
+                let start = self.get_src_handle_len() + 5;
+                let end = start + self.get_dest_handle_len();
+        
+                String::from_utf8_lossy(&self.pdu.buffer[start..end]).to_string()
+            }
+        }
+    }
+}
+
+macro_rules! sig_impl {
+    ($t:ident) => {
+        impl $t {
+            pub fn get_signature_len(&self) -> usize {
+                let src_handle_len = self.get_src_handle_len();
+                let dest_handle_len = self.get_dest_handle_len();
+                let blocksize: usize = self.pdu.buffer[5 + src_handle_len + dest_handle_len].into();
+                return blocksize * 256;
+            }
+        
+            pub fn get_signature(&self) -> &[u8] {
+                let start = self.get_src_handle_len() + self.get_dest_handle_len() + 6;
+                let end = start + self.get_signature_len();
+                
+                &self.pdu.buffer[start..end]
+            }
+
+            pub fn get_hash(&self) -> &[u8] {
+                let start = self.len() - 32;
+        
+                &self.pdu.buffer[start..]
+            }
+        
+            pub fn check_hash(&self) -> bool {
+                // Compute hash of pdu
+                let mut hasher = Sha256::new();
+                hasher.update(&self.pdu.buffer[..self.len() - 32]);
+                let digest = hasher.finalize();
+        
+                // Check hash against
+                digest.as_slice() == self.get_hash()
             }
         }
     }
@@ -111,6 +181,7 @@ pub struct MessagePDU {
 }
 
 pdu_impl!(MessagePDU);
+handle_impl!(MessagePDU);
 impl MessagePDU {
     pub fn new(src_handle: &str, dest_handle: &str, nonce: &[u8], ciphertext: &[u8]) -> MessagePDU {
         let len = 3 + 1 + src_handle.len() + 1 + dest_handle.len() + 12 + ciphertext.len();
@@ -129,29 +200,6 @@ impl MessagePDU {
         buffer.put(ciphertext);                                 // Message
 
         MessagePDU { pdu: PDU { buffer }}
-    }
-
-    pub fn get_src_handle_len(&self) -> usize {
-        self.pdu.buffer[3].into()
-    }
-
-    pub fn get_src_handle(&self) -> String {
-        let start = 4;
-        let end = start + self.get_src_handle_len();
-
-        String::from_utf8_lossy(&self.pdu.buffer[start..end]).to_string()
-    }
-
-    pub fn get_dest_handle_len(&self) -> usize {
-        let src_handle_len = self.get_src_handle_len();
-        self.pdu.buffer[src_handle_len + 4].into()
-    }
-
-    pub fn get_dest_handle(&self) -> String {
-        let start = self.get_src_handle_len() + 5;
-        let end = start + self.get_dest_handle_len();
-
-        String::from_utf8_lossy(&self.pdu.buffer[start..end]).to_string()
     }
 
     pub fn get_nonce(&self) -> &[u8] {
@@ -180,13 +228,15 @@ impl FlagOnlyPDU {
     }
 }
 
-pub struct KeyExchangePDU {
+pub struct SessionInitPDU {
     pdu: PDU,
 }
 
-pdu_impl!(KeyExchangePDU);
-impl KeyExchangePDU {
-    pub fn new(src_handle: &str, dest_handle: &str, sig: &[u8], key: &[u8]) -> KeyExchangePDU {
+pdu_impl!(SessionInitPDU);
+handle_impl!(SessionInitPDU);
+sig_impl!(SessionInitPDU);
+impl SessionInitPDU {
+    pub fn new(src_handle: &str, dest_handle: &str, sig: &[u8], key: &[u8]) -> SessionInitPDU {
 
         let len = 3 + 1 + src_handle.len() + 1 + dest_handle.len() + 1 + sig.len() + key.len() + 32;
 
@@ -204,48 +254,11 @@ impl KeyExchangePDU {
         buffer.put(key);                                        // Encrypted Key
 
         let mut hasher = Sha256::new();                         
-        hasher.update(buffer.to_vec());
+        hasher.update(&buffer[..len - 32]);
         let digest = hasher.finalize();
         buffer.put(digest.as_slice());                          // Hash
 
-        KeyExchangePDU { pdu: PDU { buffer }}
-    }
-
-    pub fn get_src_handle_len(&self) -> usize {
-        self.pdu.buffer[3].into()
-    }
-
-    pub fn get_src_handle(&self) -> String {
-        let start = 4;
-        let end = start + self.get_src_handle_len();
-
-        String::from_utf8_lossy(&self.pdu.buffer[start..end]).to_string()
-    }
-
-    pub fn get_dest_handle_len(&self) -> usize {
-        let src_handle_len = self.get_src_handle_len();
-        self.pdu.buffer[src_handle_len + 4].into()
-    }
-
-    pub fn get_dest_handle(&self) -> String {
-        let start = self.get_src_handle_len() + 5;
-        let end = start + self.get_dest_handle_len();
-
-        String::from_utf8_lossy(&self.pdu.buffer[start..end]).to_string()
-    }
-
-    pub fn get_signature_len(&self) -> usize {
-        let src_handle_len = self.get_src_handle_len();
-        let dest_handle_len = self.get_dest_handle_len();
-        let blocksize: usize = self.pdu.buffer[5 + src_handle_len + dest_handle_len].into();
-        return blocksize * 256;
-    }
-
-    pub fn get_signature(&self) -> &[u8] {
-        let start = self.get_src_handle_len() + self.get_dest_handle_len() + 6;
-        let end = start + self.get_signature_len();
-        
-        &self.pdu.buffer[start..end]
+        SessionInitPDU { pdu: PDU { buffer }}
     }
 
     pub fn get_key(&self) -> &[u8] {
@@ -254,20 +267,38 @@ impl KeyExchangePDU {
 
         &self.pdu.buffer[start..end]
     }
+}
 
-    pub fn get_hash(&self) -> &[u8] {
-        let start = self.len() - 32;
+pub struct SessionReplyPDU {
+    pdu: PDU,
+}
 
-        &self.pdu.buffer[start..]
-    }
+pdu_impl!(SessionReplyPDU);
+handle_impl!(SessionReplyPDU);
+sig_impl!(SessionReplyPDU);
+impl SessionReplyPDU {
+    pub fn new(src_handle: &str, dest_handle: &str, sig: &[u8]) -> SessionInitPDU {
 
-    pub fn check_hash(&self) -> bool {
-        // Compute hash
-        let mut hasher = Sha256::new();
-        hasher.update(self.buffer[..self.len() - 32]);
+        let len = 3 + 1 + src_handle.len() + 1 + dest_handle.len() + 1 + sig.len() + 32;
+
+        let mut buffer = BytesMut::with_capacity(len);
+        let sig_block_size = sig.len() / 256;
+
+        buffer.put_u16(len.try_into().unwrap());                // PDU Length
+        buffer.put_u8(4);                                       // Flag
+        buffer.put_u8(src_handle.len().try_into().unwrap());    // Src Handle Len
+        buffer.put(src_handle.as_bytes());                      // Src Handle
+        buffer.put_u8(dest_handle.len().try_into().unwrap());   // Dest Handle Len
+        buffer.put(dest_handle.as_bytes());                     // Dest Handle
+        buffer.put_u8(sig_block_size.try_into().unwrap());      // Signature Len (blocks of 256B)
+        buffer.put(sig);                                        // Signature
+
+        let mut hasher = Sha256::new();                         
+        hasher.update(&buffer[..len - 32]);
         let digest = hasher.finalize();
+        buffer.put(digest.as_slice());                          // Hash
 
-        digest == self.get
+        SessionInitPDU { pdu: PDU { buffer }}
     }
 }
 
@@ -308,12 +339,12 @@ pub struct RSAInfo {
 }
 
 impl RSAInfo {
-    pub fn new(key_str: &str) -> Result<RSAInfo> {
-        let private_key = RsaPrivateKey::from_pkcs1_pem(key_str)?;
+    pub fn new(key_str: &str) -> RSAInfo {
+        let private_key = RsaPrivateKey::from_pkcs1_pem(key_str).unwrap();
         let rng = OsRng;
         let session_key_gen = ChaCha20Rng::from_entropy();
 
-        Ok(RSAInfo { private_key, rng, session_key_gen })
+        RSAInfo { private_key, rng, session_key_gen }
     }
 
     // Hash with SHA256 and encrypt with my private key
@@ -343,7 +374,7 @@ impl RSAInfo {
     }
 
     // Decrypt with other's public key
-    pub fn verify(&mut self, sig: &[u8], expected: &str, key_str: &str) -> std::result::Result<(), rsa::errors::Error> {
+    pub fn verify(&mut self, sig: &[u8], expected: &str, key_str: &str) -> Result<bool, rsa::pkcs1::Error> {
         let public_key = RsaPublicKey::from_pkcs1_pem(key_str)?;
         let padding = PaddingScheme::new_pkcs1v15_sign(Some(rsa::Hash::SHA2_256));
 
@@ -353,7 +384,11 @@ impl RSAInfo {
         let digest = hasher.finalize();
 
         // Verify hash with public key
-        public_key.verify(padding, &digest, sig)
+        if let Ok(()) = public_key.verify(padding, &digest, sig) {
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub fn generate_session_key(&mut self) -> Vec<u8> {
@@ -363,17 +398,16 @@ impl RSAInfo {
     }
 }
 
-pub fn key_path_to_str(key_path: &str) -> Result<String> {
-    let key_path = expand_tilde(key_path);
-    let mut file = File::open(&key_path)?;
+pub fn key_path_to_str(key_path: &str) -> Result<String, std::io::Error> {
+    let mut file = File::open(key_path)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
     Ok(contents)
 }
 
-pub async fn read_pdu(client: &mut OwnedReadHalf) -> Result<BytesMut> {
+pub async fn read_pdu(stream: &mut OwnedReadHalf) -> Result<BytesMut, rsa::pkcs1::Error> {
     let mut len_buf: [u8; 2] = [0; 2];
-    client.read_exact(&mut len_buf).await?;
+    stream.read_exact(&mut len_buf).await?;
 
     let len = u16::from_be_bytes(len_buf);
 
@@ -381,7 +415,7 @@ pub async fn read_pdu(client: &mut OwnedReadHalf) -> Result<BytesMut> {
     let rem_len: usize = (len-2).into();
     let mut rem_buf = vec![0u8; rem_len]; 
 
-    client.read_exact(&mut rem_buf).await?;
+    stream.read_exact(&mut rem_buf).await?;
     
     // Place the bytes in the PDU buffer
     let mut buffer = BytesMut::with_capacity(len.into());
@@ -395,18 +429,10 @@ pub fn get_flag_from_bytes(bytes: &BytesMut) -> u8 {
     bytes[2]
 }
 
-// Replaces ~'s in a path with the user's home directory
-pub fn expand_tilde(path: &str) -> String {
-    // Find location of ~ and split string
-    let i = match path.find('~') {
-        Some(i) => i,
-        None => return path.to_string(),
-    };
-
-    let p1 = &path[..i];
-    let p2 = &path[i+1..];
-
-    format!("{}{}{}", p1, env::var("HOME").unwrap(), p2)
+pub fn get_private_key_path(handle: &str) -> String {
+    format!("{}/.chachat/{}", env::var("HOME").unwrap(), handle)
 }
 
-// Asynchronously polls two channels
+pub fn get_public_key_path(handle: &str) -> String {
+    format!("{}.pub", get_private_key_path(handle))
+}

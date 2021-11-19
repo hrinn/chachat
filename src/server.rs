@@ -1,8 +1,8 @@
 use std::error::Error;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::net::*;
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::TcpListener;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc::{Sender, Receiver, channel};
 use tokio::io::{AsyncWriteExt};
 use futures::lock::Mutex;
@@ -64,7 +64,7 @@ async fn send_handle_response(client: &mut OwnedWriteHalf, accepted: bool) {
     });
 }
 
-async fn handle_pdus_from_client(client: &mut tcp::OwnedReadHalf, handle: &String, channels: SenderMap) {
+async fn handle_pdus_from_client(client: &mut OwnedReadHalf, handle: &String, channels: SenderMap) {
     loop {
         let buf = match read_pdu(client).await {
         Err(_) => {
@@ -77,7 +77,7 @@ async fn handle_pdus_from_client(client: &mut tcp::OwnedReadHalf, handle: &Strin
         };
 
         match get_flag_from_bytes(&buf) {
-            4 => handle_session_init(KeyExchangePDU::from_bytes(buf), &channels).await,
+            4 => handle_session_init(SessionInitPDU::from_bytes(buf), &channels).await,
             7 => handle_message(MessagePDU::from_bytes(buf), &channels).await,
             _ => unreachable!()
         }
@@ -89,7 +89,7 @@ async fn handle_message(pdu: MessagePDU, channels: &SenderMap) {
     forward_pdu(&pdu.get_dest_handle(), &pdu.get_src_handle(), pdu.as_vec(), channels).await;
 }
 
-async fn handle_session_init(pdu: KeyExchangePDU, channels: &SenderMap) {
+async fn handle_session_init(pdu: SessionInitPDU, channels: &SenderMap) {
     println!("{} -> {}: Propose session", pdu.get_src_handle(), pdu.get_dest_handle());
     forward_pdu(&pdu.get_dest_handle(), &pdu.get_src_handle(), pdu.as_vec(), channels).await;
 }

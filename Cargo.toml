@@ -11,13 +11,13 @@ description = "An encrypted messaging program for the command line"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = "2.33.3"
-bytes = "1.1.0"
+clap = "2.33"
+bytes = "1.1"
 futures = "0.3"
 tokio = { version = "1", features = ["full", "io-util"] }
-chacha20poly1305 = "0.9.0"
-rand = "0.8.4"
-rand_chacha = "0.3.1"
-rand_seeder = "0.2.2"
-rsa = "0.5.0"
-sha2 = "0.9.8"
+chacha20poly1305 = "0.9"
+rand = "0.8"
+rand_chacha = "0.3"
+rand_seeder = "0.2"
+rsa = "0.5"
+sha2 = "0.9"

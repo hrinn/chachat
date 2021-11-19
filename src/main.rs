@@ -1,11 +1,9 @@
 extern crate clap;
 use clap::{Arg, App, SubCommand, ArgMatches};
 use std::process;
-use std::env;
 mod client;
 mod server;
 mod keygen;
-use chachat::expand_tilde;
 
 const DEFAULT_PORT: u16 = 3030;
 
@@ -38,13 +36,18 @@ async fn main() {
                 .help("Server's port")
                 .index(1)))
         .subcommand(SubCommand::with_name("keygen")
-            .about("Generates an RSA key to be used with ChaChat"))
+            .about("Generates an RSA key to be used with ChaChat")
+            .arg(Arg::with_name("username")
+                .value_name("NAME")
+                .help("Username for logging into the server")
+                .required(true)
+                .index(1)))
             .get_matches();
 
     match app_m.subcommand() {
         ("client", Some(client_m)) => run_client(client_m).await,
         ("server", Some(server_m)) => run_server(server_m).await,
-        ("keygen", _) => run_keygen(),
+        ("keygen", Some(keygen_m)) => run_keygen(keygen_m),
         _ => println!("No subcommand was used"),
     }
 }
@@ -75,8 +78,9 @@ fn parse_port(port: Option<&str>) -> u16 {
     }
 }
 
-fn run_keygen() {
-    keygen::keygen().unwrap_or_else(|err| {
+fn run_keygen(matches: &ArgMatches<'_>) {
+    let username = matches.value_of("username").unwrap();
+    keygen::keygen(username).unwrap_or_else(|err| {
         println!("Error generating key: {}", err);
         process::exit(1);
     });

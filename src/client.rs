@@ -2,12 +2,10 @@ use std::error::Error;
 use std::io::Write;
 use std::sync::Arc;
 use std::collections::HashMap;
-use std::env;
 use futures::lock::Mutex;
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedWriteHalf, OwnedReadHalf};
 use tokio::io::AsyncWriteExt;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::mpsc::{Sender, Receiver, channel};
 use chacha20poly1305::Nonce;
 use chacha20poly1305::aead::Aead;
 use rand_chacha::ChaCha20Rng;
@@ -23,6 +21,7 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
     println!("Connecting to {}", host);
     let server = TcpStream::connect(host).await?;
 
+    // Break the server into two that can be shared
     let (mut read_server, mut write_server) = server.into_split();
 
     // Send handle to server
@@ -38,8 +37,9 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
     }
 
     // Create RSA Info (holds everything for RSA encryption)
-    let key_path = format!("{}/.chachat/{}", env::var("HOME").unwrap(), handle);
-    let rsa_info = Arc::new(Mutex::new(RSAInfo::new(&key_path)?)); // Might need to be async
+    let key_path = get_private_key_path(handle);
+    let key_str = key_path_to_str(&key_path)?;
+    let rsa_info = Arc::new(Mutex::new(RSAInfo::new(&key_str)));
     let rsa_info_clone = Arc::clone(&rsa_info);
 
     // Setup SessionInfo Map (holds everything for ChaCha encryption per session)
@@ -50,20 +50,20 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
     let nonce_gen = ChaCha20Rng::from_entropy();
 
     // Spawn a task for reading commands from user
-    let stdio_reader = tokio::spawn(async move {
+    let stdio_handler = tokio::spawn(async move {
         handle_input_from_user(&handle_pdu.get_handle(), &mut write_server, sessions, rsa_info, nonce_gen).await.unwrap_or_else(|e| {
             eprintln!("error in user input task: {}", e)
         })
     });
 
     // Spawn a task for reading messages from server
-    let server_reader = tokio::spawn(async move {
+    let server_handler = tokio::spawn(async move {
         handle_pdus_from_server(&mut read_server, sessions_clone, rsa_info_clone).await.unwrap_or_else(|e| {
             eprintln!("error in message reader task: {}", e);
         })
     });
 
-    tokio::try_join!(stdio_reader, server_reader)?;
+    tokio::try_join!(stdio_handler, server_handler)?;
 
     Ok(())
 }
@@ -143,23 +143,14 @@ async fn send_message(handle: &str, input: &str, server: &mut OwnedWriteHalf, se
 
 async fn initiate_session(handle: &str, input: &str, server: &mut OwnedWriteHalf, sessions: &SessionsMap, rsa_info: &Arc<Mutex<RSAInfo>>) {
     // Parse user input
-    let session_usage = "USAGE: /s <USER> <PATH/TO/USER'S/PUBLIC/KEY>";
+    let session_usage = "USAGE: /s <USER>";
     if input.len() < 3 {
         eprintln!("{}", session_usage);
         return;
     }
-    let input = &input[3..];
-    
-    let index = match input.find(' ') {
-        Some(i) => i,
-        None => {
-            eprintln!("{}", session_usage);
-            return;
-        }
-    };
 
-    let (dest, public_key_path) = input.split_at(index);
-    let public_key_path = &public_key_path[1..];
+    let dest = &input[3..];
+    
     if sessions.lock().await.contains_key(dest) {
         println!("Session already active with {}", dest);
         return;
@@ -170,17 +161,16 @@ async fn initiate_session(handle: &str, input: &str, server: &mut OwnedWriteHalf
     sessions.lock().await.insert(dest.to_string(), SessionInfo::from_key(&key));
 
     // Encrypt session key with dest's public key
-    let key_str = key_path_to_str(&public_key_path).expect("Invalid path to public key");
+    let key_path = get_public_key_path(dest);
+    let key_str = key_path_to_str(&key_path).expect("Invalid path to public key");
     let encrypted_key = rsa_info.lock().await.encrypt(&key, &key_str);
 
     // Sign handle with your private key
     let signature = rsa_info.lock().await.sign(handle.as_bytes());
 
     // Send packet
-    let pdu = KeyExchangePDU::new(handle, dest, &signature, &encrypted_key);
+    let pdu = SessionInitPDU::new(handle, dest, &signature, &encrypted_key);
     server.write_all(pdu.as_bytes()).await.unwrap();
-
-    // Await session response
 }
 
 async fn list_sessions(sessions: &SessionsMap) {
@@ -198,7 +188,7 @@ async fn handle_pdus_from_server(server: &mut OwnedReadHalf, sessions: SessionsM
         };
 
         match get_flag_from_bytes(&buf) {
-            4 => accept_session(server, KeyExchangePDU::from_bytes(buf), &sessions, &rsa_info).await,
+            4 => accept_session(server, SessionInitPDU::from_bytes(buf), &sessions, &rsa_info).await,
             7 => display_message(MessagePDU::from_bytes(buf), &sessions).await?,
             8 => println!("User is not logged in.\n> "), // Remove them from the sessions if one is active
             _ => eprintln!("Not implemented."),
@@ -206,16 +196,21 @@ async fn handle_pdus_from_server(server: &mut OwnedReadHalf, sessions: SessionsM
     }
 }
 
-async fn accept_session(_server: &mut OwnedReadHalf, pdu: KeyExchangePDU, sessions: &SessionsMap, rsa_info: &Arc<Mutex<RSAInfo>>) {
+async fn accept_session(server: &mut OwnedReadHalf, pdu: SessionInitPDU, sessions: &SessionsMap, rsa_info: &Arc<Mutex<RSAInfo>>) {
     // Check hash on pdu
+    if !pdu.check_hash() {
+        println!("Computed hash did not match sent hash. Message may have changed in transit.");
+        return;
+    }
     
     // Get path to the sender's public key
-    let key_path = format!("{}/.chachat/{}.pub", env::var("HOME").unwrap(), pdu.get_src_handle());
+    let key_path = get_public_key_path(&pdu.get_src_handle());
+    let key_str = key_path_to_str(&key_path).unwrap();
 
     // Verify the signature on the pdu
-    let result = rsa_info.lock().await.verify(pdu.get_signature(), pdu.get_src_handle(), key_path).unwrap_or_else(|_| {
+    let result = rsa_info.lock().await.verify(pdu.get_signature(), &pdu.get_src_handle(), &key_str).unwrap_or_else(|_| {
         println!("Unable to accept session from {}. You do not have their public key", pdu.get_src_handle());
-        return;
+        false
     });
 
     if !result {
@@ -228,22 +223,22 @@ async fn accept_session(_server: &mut OwnedReadHalf, pdu: KeyExchangePDU, sessio
 
     // Add key to session map
     let session = SessionInfo::from_key(&key);
-    sessions.lock().await.insert(pdu.get_dest_handle(), session);
+    sessions.lock().await.insert(pdu.get_src_handle(), session);
 
-    // Send signature back to src
+    println!("Accepted new session from {}", pdu.get_src_handle());
 
-    // Send accept packet back
-    // send_session_accept(server, &pdu.get_src_handle(), &pdu.get_dest_handle(), rsa_info);
-
+    send_session_accept(server, &pdu.get_dest_handle(), &pdu.get_src_handle(), rsa_info).await;
 }
 
-// async fn send_session_reject(server: &mut OwnedReadHalf, src_handle: &str, dest_handle: &str) {
+async fn send_session_accept(server: &mut OwnedReadHalf, handle: &str, dest: &str, rsa_info: &Arc<Mutex<RSAInfo>>) {
+    // Sign your own handle
+    let signature = rsa_info.lock().await.sign(handle.as_bytes());
 
-// }
-
-// async fn send_session_accept(server: &mut OwnedReadHalf, src_handle: &str, dest_handle: &str, rsa_info: &Arc<Mutex<RSAInfo>>) {
-
-// }
+    // Send PDU
+    let pdu = SessionReplyPDU::new(handle, dest, &signature);
+    println!("Pretending to send session accept. Must send to channel");
+    // server.lock().await.write_all(pdu.as_bytes()).await.unwrap();
+}
 
 async fn display_message(pdu: MessagePDU, sessions: &SessionsMap) -> Result<(), tokio::task::JoinError> {
     let nonce = Nonce::from_slice(pdu.get_nonce());
