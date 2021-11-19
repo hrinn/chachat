@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use futures::lock::Mutex;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedWriteHalf, OwnedReadHalf};
+use tokio::sync::mpsc::{Sender, Receiver, channel};
 use tokio::io::AsyncWriteExt;
 use chacha20poly1305::Nonce;
 use chacha20poly1305::aead::Aead;
@@ -21,7 +22,7 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
     println!("Connecting to {}", host);
     let server = TcpStream::connect(host).await?;
 
-    // Break the server into two that can be shared
+    // Break the server into a read half and write half
     let (mut read_server, mut write_server) = server.into_split();
 
     // Send handle to server
@@ -35,6 +36,10 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
         println!("Handle {} is already in use", handle);
         return Ok(()); // TODO: Descriptive error
     }
+
+    // Create channels for thread communication
+    let (tx, rx) = channel(32);
+    let tx_clone = tx.clone();
 
     // Create RSA Info (holds everything for RSA encryption)
     let key_path = get_private_key_path(handle);
@@ -51,24 +56,40 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
 
     // Spawn a task for reading commands from user
     let stdio_handler = tokio::spawn(async move {
-        handle_input_from_user(&handle_pdu.get_handle(), &mut write_server, sessions, rsa_info, nonce_gen).await.unwrap_or_else(|e| {
+        handle_input_from_user(&handle_pdu.get_handle(), tx, sessions, rsa_info, nonce_gen).await.unwrap_or_else(|e| {
             eprintln!("error in user input task: {}", e)
         })
     });
 
     // Spawn a task for reading messages from server
     let server_handler = tokio::spawn(async move {
-        handle_pdus_from_server(&mut read_server, sessions_clone, rsa_info_clone).await.unwrap_or_else(|e| {
+        handle_pdus_from_server(&mut read_server, tx_clone, sessions_clone, rsa_info_clone).await.unwrap_or_else(|e| {
             eprintln!("error in message reader task: {}", e);
         })
     });
 
-    tokio::try_join!(stdio_handler, server_handler)?;
+    // Spawn a task for writing messages to server
+    let server_writer = tokio::spawn(async move {
+        write_to_server(&mut write_server, rx).await;
+    });
+
+    tokio::try_join!(stdio_handler, server_handler, server_writer)?;
 
     Ok(())
 }
 
-async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf, sessions: SessionsMap, rsa_info: Arc<Mutex<RSAInfo>>, mut nonce_gen: ChaCha20Rng) -> Result<(), Box<dyn Error>> {
+async fn write_to_server(server: &mut OwnedWriteHalf, mut rx: Receiver<Vec<u8>>) {
+    loop {
+        if let Some(pdu) = rx.recv().await {
+            println!("Writing {}B to server", pdu.len());
+            server.write_all(&pdu).await.unwrap();
+        } else {
+            return; // Channel closed,
+        }
+    }
+}
+
+async fn handle_input_from_user(handle: &str, tx: Sender<Vec<u8>>, sessions: SessionsMap, rsa_info: Arc<Mutex<RSAInfo>>, mut nonce_gen: ChaCha20Rng) -> Result<(), Box<dyn Error>> {
     // Handle was accepted
     println!("Type /h for help");
     let usage = "COMMANDS:\n    /h - Help\n    /u - List users\n    \
@@ -87,8 +108,8 @@ async fn handle_input_from_user(handle: &str, server: &mut OwnedWriteHalf, sessi
         }
 
         match &input[0..2] {
-            "/m" | "/M" => send_message(handle, &input, server, &sessions, &mut nonce_gen).await.unwrap(),
-            "/s" | "/S" => initiate_session(handle, &input, server, &sessions, &rsa_info).await,
+            "/m" | "/M" => send_message(handle, &input, &tx, &sessions, &mut nonce_gen).await.unwrap(),
+            "/s" | "/S" => initiate_session(handle, &input, &tx, &sessions, &rsa_info).await,
             "/l" | "/L" => list_sessions(&sessions).await,
             "/u" | "/U" => eprintln!("Not implemented."),
             "/h" | "/H" => println!("{}", usage),
@@ -106,7 +127,7 @@ async fn stdin_readline() -> String {
     }).await.expect("Failed to read line from stdin")
 }
 
-async fn send_message(handle: &str, input: &str, server: &mut OwnedWriteHalf, sessions: &SessionsMap, nonce_gen: &mut ChaCha20Rng) -> Result<(), Box<dyn Error>> {
+async fn send_message(handle: &str, input: &str, tx: &Sender<Vec<u8>>, sessions: &SessionsMap, nonce_gen: &mut ChaCha20Rng) -> Result<(), Box<dyn Error>> {
     let message_usage = "USAGE: /m <USER> <MESSAGE>";
     if input.len() < 3 {
         eprintln!("{}", message_usage);
@@ -136,12 +157,13 @@ async fn send_message(handle: &str, input: &str, server: &mut OwnedWriteHalf, se
         .expect("Failed to encrypt message!");
     
     let message_pdu = MessagePDU::new(handle, dest, nonce.as_slice(), &ciphertext);
-    server.write_all(message_pdu.as_bytes()).await?;
+
+    tx.send(message_pdu.as_vec()).await?;
 
     Ok(())
 }
 
-async fn initiate_session(handle: &str, input: &str, server: &mut OwnedWriteHalf, sessions: &SessionsMap, rsa_info: &Arc<Mutex<RSAInfo>>) {
+async fn initiate_session(handle: &str, input: &str, tx: &Sender<Vec<u8>>, sessions: &SessionsMap, rsa_info: &Arc<Mutex<RSAInfo>>) {
     // Parse user input
     let session_usage = "USAGE: /s <USER>";
     if input.len() < 3 {
@@ -170,7 +192,7 @@ async fn initiate_session(handle: &str, input: &str, server: &mut OwnedWriteHalf
 
     // Send packet
     let pdu = SessionInitPDU::new(handle, dest, &signature, &encrypted_key);
-    server.write_all(pdu.as_bytes()).await.unwrap();
+    tx.send(pdu.as_vec()).await.unwrap();
 }
 
 async fn list_sessions(sessions: &SessionsMap) {
@@ -180,7 +202,7 @@ async fn list_sessions(sessions: &SessionsMap) {
     }
 }
 
-async fn handle_pdus_from_server(server: &mut OwnedReadHalf, sessions: SessionsMap, rsa_info: Arc<Mutex<RSAInfo>>) -> Result<(), Box<dyn Error>> {
+async fn handle_pdus_from_server(server: &mut OwnedReadHalf, tx: Sender<Vec<u8>>, sessions: SessionsMap, rsa_info: Arc<Mutex<RSAInfo>>) -> Result<(), Box<dyn Error>> {
     loop {
         let buf = match read_pdu(server).await {
             Ok(buf) => buf,
@@ -188,7 +210,7 @@ async fn handle_pdus_from_server(server: &mut OwnedReadHalf, sessions: SessionsM
         };
 
         match get_flag_from_bytes(&buf) {
-            4 => accept_session(server, SessionInitPDU::from_bytes(buf), &sessions, &rsa_info).await,
+            4 => accept_session(&tx, SessionInitPDU::from_bytes(buf), &sessions, &rsa_info).await,
             7 => display_message(MessagePDU::from_bytes(buf), &sessions).await?,
             8 => println!("User is not logged in.\n> "), // Remove them from the sessions if one is active
             _ => eprintln!("Not implemented."),
@@ -196,7 +218,7 @@ async fn handle_pdus_from_server(server: &mut OwnedReadHalf, sessions: SessionsM
     }
 }
 
-async fn accept_session(server: &mut OwnedReadHalf, pdu: SessionInitPDU, sessions: &SessionsMap, rsa_info: &Arc<Mutex<RSAInfo>>) {
+async fn accept_session(tx: &Sender<Vec<u8>>, pdu: SessionInitPDU, sessions: &SessionsMap, rsa_info: &Arc<Mutex<RSAInfo>>) {
     // Check hash on pdu
     if !pdu.check_hash() {
         println!("Computed hash did not match sent hash. Message may have changed in transit.");
@@ -227,17 +249,16 @@ async fn accept_session(server: &mut OwnedReadHalf, pdu: SessionInitPDU, session
 
     println!("Accepted new session from {}", pdu.get_src_handle());
 
-    send_session_accept(server, &pdu.get_dest_handle(), &pdu.get_src_handle(), rsa_info).await;
+    send_session_accept(tx, &pdu.get_dest_handle(), &pdu.get_src_handle(), rsa_info).await;
 }
 
-async fn send_session_accept(server: &mut OwnedReadHalf, handle: &str, dest: &str, rsa_info: &Arc<Mutex<RSAInfo>>) {
+async fn send_session_accept(tx: &Sender<Vec<u8>>, handle: &str, dest: &str, rsa_info: &Arc<Mutex<RSAInfo>>) {
     // Sign your own handle
     let signature = rsa_info.lock().await.sign(handle.as_bytes());
 
     // Send PDU
     let pdu = SessionReplyPDU::new(handle, dest, &signature);
-    println!("Pretending to send session accept. Must send to channel");
-    // server.lock().await.write_all(pdu.as_bytes()).await.unwrap();
+    tx.send(pdu.as_vec()).await.unwrap();
 }
 
 async fn display_message(pdu: MessagePDU, sessions: &SessionsMap) -> Result<(), tokio::task::JoinError> {
