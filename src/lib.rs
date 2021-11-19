@@ -150,6 +150,13 @@ impl PDU {
     }
 }
 
+// Not a real PDU, just of a common format where sender and receiver are the first two fields
+pub struct ForwardPDU {
+    pdu: PDU
+}
+pdu_impl!(ForwardPDU);
+handle_impl!(ForwardPDU);
+
 pub struct HandlePDU {
     pdu: PDU
 }
@@ -285,7 +292,7 @@ impl SessionReplyPDU {
         let sig_block_size = sig.len() / 256;
 
         buffer.put_u16(len.try_into().unwrap());                // PDU Length
-        buffer.put_u8(4);                                       // Flag
+        buffer.put_u8(5);                                       // Flag
         buffer.put_u8(src_handle.len().try_into().unwrap());    // Src Handle Len
         buffer.put(src_handle.as_bytes());                      // Src Handle
         buffer.put_u8(dest_handle.len().try_into().unwrap());   // Dest Handle Len

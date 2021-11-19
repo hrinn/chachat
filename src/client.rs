@@ -78,15 +78,9 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
     Ok(())
 }
 
-async fn write_to_server(server: &mut OwnedWriteHalf, mut rx: Receiver<Vec<u8>>) {
-    loop {
-        if let Some(pdu) = rx.recv().await {
-            println!("Writing {}B to server", pdu.len());
-            server.write_all(&pdu).await.unwrap();
-        } else {
-            return; // Channel closed,
-        }
-    }
+fn prompt() {
+    std::io::stdout().write_all("> ".as_bytes()).unwrap();
+    std::io::stdout().flush().unwrap();
 }
 
 async fn handle_input_from_user(handle: &str, tx: Sender<Vec<u8>>, sessions: SessionsMap, rsa_info: Arc<Mutex<RSAInfo>>, mut nonce_gen: ChaCha20Rng) -> Result<(), Box<dyn Error>> {
@@ -98,8 +92,7 @@ async fn handle_input_from_user(handle: &str, tx: Sender<Vec<u8>>, sessions: Ses
 
     // Parse commands from user
     loop {
-        std::io::stdout().write_all("> ".as_bytes())?;
-        std::io::stdout().flush()?;
+        prompt();
         let input = stdin_readline().await;
         
         if input.len() < 2 {
@@ -211,10 +204,13 @@ async fn handle_pdus_from_server(server: &mut OwnedReadHalf, tx: Sender<Vec<u8>>
 
         match get_flag_from_bytes(&buf) {
             4 => accept_session(&tx, SessionInitPDU::from_bytes(buf), &sessions, &rsa_info).await,
-            7 => display_message(MessagePDU::from_bytes(buf), &sessions).await?,
-            8 => println!("User is not logged in.\n> "), // Remove them from the sessions if one is active
+            5 => check_session_response(SessionReplyPDU::from_bytes(buf), &sessions, &rsa_info).await,
+            7 => display_message(MessagePDU::from_bytes(buf), &sessions).await,
+            8 => println!("User is not logged in."), // Remove them from the sessions if one is active
             _ => eprintln!("Not implemented."),
         }
+
+        prompt();
     }
 }
 
@@ -224,18 +220,8 @@ async fn accept_session(tx: &Sender<Vec<u8>>, pdu: SessionInitPDU, sessions: &Se
         println!("Computed hash did not match sent hash. Message may have changed in transit.");
         return;
     }
-    
-    // Get path to the sender's public key
-    let key_path = get_public_key_path(&pdu.get_src_handle());
-    let key_str = key_path_to_str(&key_path).unwrap();
 
-    // Verify the signature on the pdu
-    let result = rsa_info.lock().await.verify(pdu.get_signature(), &pdu.get_src_handle(), &key_str).unwrap_or_else(|_| {
-        println!("Unable to accept session from {}. You do not have their public key", pdu.get_src_handle());
-        false
-    });
-
-    if !result {
+    if !check_signature(&pdu.get_src_handle(), pdu.get_signature(), rsa_info).await {
         println!("{}'s signature could not be verified", pdu.get_src_handle());
         return;
     }
@@ -247,7 +233,7 @@ async fn accept_session(tx: &Sender<Vec<u8>>, pdu: SessionInitPDU, sessions: &Se
     let session = SessionInfo::from_key(&key);
     sessions.lock().await.insert(pdu.get_src_handle(), session);
 
-    println!("Accepted new session from {}", pdu.get_src_handle());
+    println!("Started session with {}", pdu.get_src_handle());
 
     send_session_accept(tx, &pdu.get_dest_handle(), &pdu.get_src_handle(), rsa_info).await;
 }
@@ -261,26 +247,53 @@ async fn send_session_accept(tx: &Sender<Vec<u8>>, handle: &str, dest: &str, rsa
     tx.send(pdu.as_vec()).await.unwrap();
 }
 
-async fn display_message(pdu: MessagePDU, sessions: &SessionsMap) -> Result<(), tokio::task::JoinError> {
+async fn check_session_response(pdu: SessionReplyPDU, sessions: &SessionsMap, rsa_info: &Arc<Mutex<RSAInfo>>) {
+    // Check hash
+    if pdu.check_hash() && check_signature(&pdu.get_src_handle(), pdu.get_signature(), rsa_info).await {
+        println!("Started session with {}", pdu.get_src_handle());
+    } else {
+        println!("Could not start session with {}. Received bad reply", pdu.get_src_handle());
+        // Remove sender from session map
+        sessions.lock().await.remove(&pdu.get_src_handle());
+    }
+}
+
+async fn check_signature(handle: &str, signature: &[u8], rsa_info: &Arc<Mutex<RSAInfo>>) -> bool {
+    // Get path to the sender's public key
+    let key_path = get_public_key_path(handle);
+    let key_str = key_path_to_str(&key_path).unwrap();
+
+    // Verify the signature on the pdu
+    rsa_info.lock().await.verify(signature, handle, &key_str).unwrap_or_else(|_| {
+        println!("Unable to accept session from {}. You do not have their public key", handle);
+        false
+    })
+}
+
+async fn display_message(pdu: MessagePDU, sessions: &SessionsMap) {
     let nonce = Nonce::from_slice(pdu.get_nonce());
 
-    let out = match sessions.lock().await.get(&pdu.get_src_handle())
+    match sessions.lock().await.get(&pdu.get_src_handle())
         .expect("Received a message from a user you do not have a session with!")
         .get_cipher().decrypt(nonce, pdu.get_ciphertext().as_ref()) {
         Ok(plaintext) => {
             let message = String::from_utf8_lossy(&plaintext);
-            format!("{}: {}\n> ", pdu.get_src_handle(), message)
+            println!("{}: {}", pdu.get_src_handle(), message)
         },
         Err(_) => {
-            format!("Message from {} was modified in transit!", pdu.get_src_handle())
+            println!("Message from {} was modified in transit!", pdu.get_src_handle())
         },
     };
+}
 
-    let mut stdout = std::io::stdout();
-    tokio::task::spawn_blocking(move || {
-        stdout.write(out.as_bytes()).unwrap();
-        stdout.flush().unwrap();
-    }).await
+async fn write_to_server(server: &mut OwnedWriteHalf, mut rx: Receiver<Vec<u8>>) {
+    loop {
+        if let Some(pdu) = rx.recv().await {
+            server.write_all(&pdu).await.unwrap();
+        } else {
+            return; // Channel closed,
+        }
+    }
 }
 
 fn generate_nonce(nonce_gen: &mut ChaCha20Rng) -> Vec<u8> {
