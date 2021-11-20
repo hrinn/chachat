@@ -209,7 +209,7 @@ async fn handle_pdus_from_server(server: &mut OwnedReadHalf, tx: Sender<Vec<u8>>
             4 => accept_session(&tx, SessionInitPDU::from_bytes(buf), &sessions, &rsa_info).await,
             5 => check_session_response(SessionReplyPDU::from_bytes(buf), &sessions, &rsa_info).await,
             7 => display_message(MessagePDU::from_bytes(buf), &sessions).await,
-            8 => println!("User is not logged in."), // Remove them from the sessions if one is active
+            8 => handle_bad_dest(BadDestPDU::from_bytes(buf), &sessions).await,
             _ => eprintln!("Not implemented."),
         }
 
@@ -287,6 +287,13 @@ async fn display_message(pdu: MessagePDU, sessions: &SessionsMap) {
             println!("Message from {} was modified in transit!", pdu.get_src_handle())
         },
     };
+}
+
+async fn handle_bad_dest(pdu: BadDestPDU, sessions: &SessionsMap) {
+    println!("{} is not logged in", pdu.get_bad_dest());
+
+    // Remove bad dest from session map
+    sessions.lock().await.remove(&pdu.get_bad_dest());
 }
 
 async fn write_to_server(server: &mut OwnedWriteHalf, mut rx: Receiver<Vec<u8>>) {

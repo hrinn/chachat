@@ -67,7 +67,7 @@ macro_rules! handle_impl {
         
                 String::from_utf8_lossy(&self.pdu.buffer[start..end]).to_string()
             }
-            
+
             // Gets the length of the dest handle from the buffer
             pub fn get_dest_handle_len(&self) -> usize {
                 let src_handle_len = self.get_src_handle_len();
@@ -156,7 +156,6 @@ pub struct ForwardPDU {
 }
 pdu_impl!(ForwardPDU);
 handle_impl!(ForwardPDU);
-
 pub struct HandlePDU {
     pdu: PDU
 }
@@ -179,7 +178,7 @@ impl HandlePDU {
 
     // Returns the handle as a UTF8 String
     pub fn get_handle(&self) -> String {
-        String::from_utf8_lossy(&self.pdu.buffer[3..self.pdu.len()]).to_string()
+        String::from_utf8_lossy(&self.pdu.buffer[3..]).to_string()
     }
 }
 
@@ -232,6 +231,27 @@ impl FlagOnlyPDU {
         buffer.put_u16(3);
         buffer.put_u8(flag);
         FlagOnlyPDU { pdu: PDU { buffer }}
+    }
+}
+
+pub struct BadDestPDU {
+    pdu: PDU,
+}
+
+pdu_impl!(BadDestPDU);
+impl BadDestPDU {
+    pub fn new(dest_handle: &str) -> BadDestPDU {
+        let len = 3 + dest_handle.len();
+        let mut buffer = BytesMut::with_capacity(len);
+        buffer.put_u16(len.try_into().unwrap());
+        buffer.put_u8(8);
+        buffer.put(dest_handle.as_bytes());
+
+        BadDestPDU { pdu: PDU { buffer}}        
+    }
+
+    pub fn get_bad_dest(&self) -> String {
+        String::from_utf8_lossy(&self.pdu.buffer[3..]).to_string()
     }
 }
 

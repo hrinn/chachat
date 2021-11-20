@@ -92,11 +92,12 @@ async fn forward_pdu(pdu: ForwardPDU, channels: &SenderMap) {
     }
 
     println!("{} is not logged in", pdu.get_dest_handle());
-    let resp_pdu = FlagOnlyPDU::new(8);
+    
+    let resp_pdu = BadDestPDU::new(&pdu.get_dest_handle());
     if let Some(my_tx) = channels.lock().await.get(&pdu.get_src_handle()) {
         my_tx.send(resp_pdu.as_vec()).await.unwrap(); // Send no recipient PDU back to client
     } else {
-        panic!("{} is not in session map", pdu.get_src_handle());
+        eprintln!("{} is not in session map", pdu.get_src_handle());
     }
 }
 
