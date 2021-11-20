@@ -77,7 +77,7 @@ async fn handle_pdus_from_client(client: &mut OwnedReadHalf, handle: &String, ch
         };
 
         match get_flag_from_bytes(&buf) {
-            4 | 5 | 7 => forward_pdu(ForwardPDU::from_bytes(buf), &channels).await,
+            4 | 5 | 6 | 7 | 8 => forward_pdu(ForwardPDU::from_bytes(buf), &channels).await,
             _ => unreachable!()
         }
     }
@@ -93,7 +93,7 @@ async fn forward_pdu(pdu: ForwardPDU, channels: &SenderMap) {
 
     println!("{} is not logged in", pdu.get_dest_handle());
     
-    let resp_pdu = BadDestPDU::new(&pdu.get_dest_handle());
+    let resp_pdu = HandlePDU::new(&pdu.get_dest_handle(), 9);
     if let Some(my_tx) = channels.lock().await.get(&pdu.get_src_handle()) {
         my_tx.send(resp_pdu.as_vec()).await.unwrap(); // Send no recipient PDU back to client
     } else {

@@ -163,14 +163,14 @@ pub struct HandlePDU {
 pdu_impl!(HandlePDU);
 impl HandlePDU {
     // Creates a HandlePDU from a handle
-    pub fn new(handle: &str) -> HandlePDU {
+    pub fn new(handle: &str, flag: u8) -> HandlePDU {
         // Create bytes buffer
         let mut buffer = BytesMut::with_capacity(handle.len() + 3);
 
         // Fill bytes buffer
         let header_len: u16 = (handle.len() + 3).try_into().unwrap();
         buffer.put_u16(header_len);    // PDU Length
-        buffer.put_u8(1);              // Flag
+        buffer.put_u8(flag);              // Flag
         buffer.put(handle.as_bytes()); // Handle
 
         HandlePDU { pdu: PDU { buffer }}
@@ -197,7 +197,7 @@ impl MessagePDU {
 
         // Fill bytes buffer
         buffer.put_u16(len.try_into().unwrap());                // PDU Length [2B]
-        buffer.put_u8(7);                                       // Flag [1B]
+        buffer.put_u8(8);                                       // Flag [1B]
         buffer.put_u8(src_handle.len().try_into().unwrap());    // Src Handle Len [1B]
         buffer.put(src_handle.as_bytes());                      // Src Handle
         buffer.put_u8(dest_handle.len().try_into().unwrap());   // Dest Handle Len [1B]
@@ -231,27 +231,6 @@ impl FlagOnlyPDU {
         buffer.put_u16(3);
         buffer.put_u8(flag);
         FlagOnlyPDU { pdu: PDU { buffer }}
-    }
-}
-
-pub struct BadDestPDU {
-    pdu: PDU,
-}
-
-pdu_impl!(BadDestPDU);
-impl BadDestPDU {
-    pub fn new(dest_handle: &str) -> BadDestPDU {
-        let len = 3 + dest_handle.len();
-        let mut buffer = BytesMut::with_capacity(len);
-        buffer.put_u16(len.try_into().unwrap());
-        buffer.put_u8(8);
-        buffer.put(dest_handle.as_bytes());
-
-        BadDestPDU { pdu: PDU { buffer}}        
-    }
-
-    pub fn get_bad_dest(&self) -> String {
-        String::from_utf8_lossy(&self.pdu.buffer[3..]).to_string()
     }
 }
 
@@ -296,14 +275,14 @@ impl SessionInitPDU {
     }
 }
 
-pub struct SessionReplyPDU {
+pub struct SessionAcceptPDU {
     pdu: PDU,
 }
 
-pdu_impl!(SessionReplyPDU);
-handle_impl!(SessionReplyPDU);
-sig_impl!(SessionReplyPDU);
-impl SessionReplyPDU {
+pdu_impl!(SessionAcceptPDU);
+handle_impl!(SessionAcceptPDU);
+sig_impl!(SessionAcceptPDU);
+impl SessionAcceptPDU {
     pub fn new(src_handle: &str, dest_handle: &str, sig: &[u8]) -> SessionInitPDU {
 
         let len = 3 + 1 + src_handle.len() + 1 + dest_handle.len() + 1 + sig.len() + 32;
@@ -329,6 +308,32 @@ impl SessionReplyPDU {
     }
 }
 
+pub struct SessionReplyPDU {
+    pdu: PDU,
+}
+
+pdu_impl!(SessionReplyPDU);
+handle_impl!(SessionReplyPDU);
+impl SessionReplyPDU {
+    pub fn new(src_handle: &str, dest_handle: &str, accept: bool) -> SessionReplyPDU {
+        let len = 4 + src_handle.len() + 1 + dest_handle.len();
+        let mut buffer = BytesMut::with_capacity(len);
+        let flag = if accept {
+            6
+        } else {
+            7
+        };
+        buffer.put_u16(len.try_into().unwrap());
+        buffer.put_u8(flag);
+        buffer.put_u8(src_handle.len().try_into().unwrap());    // Src Handle Len
+        buffer.put(src_handle.as_bytes());                      // Src Handle
+        buffer.put_u8(dest_handle.len().try_into().unwrap());   // Dest Handle Len
+        buffer.put(dest_handle.as_bytes());                     // Dest Handle
+
+        SessionReplyPDU { pdu: PDU { buffer }}
+    }
+}
+
 #[derive(Debug)]
 pub struct ClientDisconnectError;
 impl fmt::Display for ClientDisconnectError {
@@ -345,17 +350,27 @@ impl Error for ClientDisconnectError {
 
 pub struct SessionInfo {
     cipher: ChaCha20,
+    accepted: bool,
 }
 
 impl SessionInfo {
     pub fn from_key(key: &[u8]) -> SessionInfo {
         SessionInfo {
             cipher: ChaCha20::new(Key::from_slice(key)),
+            accepted: false,
         }
     }
 
     pub fn get_cipher(&self) -> &ChaCha20 {
         &self.cipher
+    }
+
+    pub fn is_accepted(&self) -> bool {
+        self.accepted
+    }
+
+    pub fn accept(&mut self) {
+        self.accepted = true;
     }
 }
 

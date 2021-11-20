@@ -26,7 +26,7 @@ pub async fn client(handle: &str, hostname: &str, port: u16) -> Result<(), Box<d
     let (mut read_server, mut write_server) = server.into_split();
 
     // Send handle to server
-    let handle_pdu = HandlePDU::new(handle);
+    let handle_pdu = HandlePDU::new(handle, 1);
     write_server.write_all(handle_pdu.as_bytes()).await?;
 
     // Read server's response
@@ -146,6 +146,12 @@ async fn send_message(handle: &str, input: &str, tx: &Sender<Vec<u8>>, sessions:
         return Ok(())
     }
 
+    // Determine if the session has been accepted
+    if !sessions.lock().await.get(dest).unwrap().is_accepted() {
+        eprintln!("{} has not accepted the session yet", dest);
+        return Ok(())
+    }
+
     let nonce = generate_nonce(nonce_gen);
     let ciphertext = sessions.lock().await.get(dest).unwrap()
         .get_cipher()
@@ -192,9 +198,14 @@ async fn initiate_session(handle: &str, input: &str, tx: &Sender<Vec<u8>>, sessi
 }
 
 async fn list_sessions(sessions: &SessionsMap) {
-    println!("Active sessions:");
-    for user in sessions.lock().await.keys() {
-        println!("    {}", user);
+    println!("Sessions:");
+    for (user, session_info) in &*(sessions.lock().await) {
+        print!("    {} - ", user);
+        if session_info.is_accepted() {
+            println!("Active");
+        } else {
+            println!("Not accepted");
+        }
     }
 }
 
@@ -206,10 +217,12 @@ async fn handle_pdus_from_server(server: &mut OwnedReadHalf, tx: Sender<Vec<u8>>
         };
 
         match get_flag_from_bytes(&buf) {
-            4 => accept_session(&tx, SessionInitPDU::from_bytes(buf), &sessions, &rsa_info).await,
-            5 => check_session_response(SessionReplyPDU::from_bytes(buf), &sessions, &rsa_info).await,
-            7 => display_message(MessagePDU::from_bytes(buf), &sessions).await,
-            8 => handle_bad_dest(BadDestPDU::from_bytes(buf), &sessions).await,
+            4 => handle_session_init(&tx, SessionInitPDU::from_bytes(buf), &sessions, &rsa_info).await,
+            5 => handle_session_accept(&tx, SessionAcceptPDU::from_bytes(buf), &sessions, &rsa_info).await,
+            6 => handle_session_ack(SessionReplyPDU::from_bytes(buf), &sessions).await,
+            7 => handle_session_rej(SessionReplyPDU::from_bytes(buf), &sessions).await,
+            8 => display_message(MessagePDU::from_bytes(buf), &sessions).await,
+            9 => handle_bad_dest(HandlePDU::from_bytes(buf), &sessions).await,
             _ => eprintln!("Not implemented."),
         }
 
@@ -217,28 +230,45 @@ async fn handle_pdus_from_server(server: &mut OwnedReadHalf, tx: Sender<Vec<u8>>
     }
 }
 
-async fn accept_session(tx: &Sender<Vec<u8>>, pdu: SessionInitPDU, sessions: &SessionsMap, rsa_info: &Arc<Mutex<RSAInfo>>) {
-    // Check hash on pdu
-    if !pdu.check_hash() {
-        println!("Computed hash did not match sent hash. Message may have changed in transit.");
-        return;
-    }
-
-    if !check_signature(&pdu.get_src_handle(), pdu.get_signature(), rsa_info).await {
-        println!("{}'s signature could not be verified", pdu.get_src_handle());
-        return;
-    }
-
-    // Decrypt the session key
-    let key = rsa_info.lock().await.decrypt(pdu.get_key());
-
-    // Add key to session map
-    let session = SessionInfo::from_key(&key);
-    sessions.lock().await.insert(pdu.get_src_handle(), session);
-
+async fn handle_session_ack(pdu: SessionReplyPDU, sessions: &SessionsMap) {
+    // Change status of session to accepted
     println!("Started session with {}", pdu.get_src_handle());
+    sessions.lock().await.get_mut(&pdu.get_src_handle())
+        .expect("Received session ACK from user not in session map!")
+        .accept();
+}
 
-    send_session_accept(tx, &pdu.get_dest_handle(), &pdu.get_src_handle(), rsa_info).await;
+async fn handle_session_rej(pdu: SessionReplyPDU, sessions: &SessionsMap) {
+    // Remove handle from session map
+    println!("{} rejected session", pdu.get_src_handle());
+    sessions.lock().await.remove(&pdu.get_src_handle());
+}
+
+async fn handle_session_init(tx: &Sender<Vec<u8>>, pdu: SessionInitPDU, sessions: &SessionsMap, rsa_info: &Arc<Mutex<RSAInfo>>) {
+    // Check hash and signature
+    if pdu.check_hash() && check_signature(&pdu.get_src_handle(), pdu.get_signature(), rsa_info).await {
+        // Decrypt the session key
+        let key = rsa_info.lock().await.decrypt(pdu.get_key());
+
+        // Add key to session map
+        let session = SessionInfo::from_key(&key);
+        sessions.lock().await.insert(pdu.get_src_handle(), session);
+
+        println!("{} requested to start a session", pdu.get_src_handle());
+        send_session_accept(tx, &pdu.get_dest_handle(), &pdu.get_src_handle(), rsa_info).await;
+    } else {
+        // Could not be verified
+        println!("Receive bad session init from {}", pdu.get_src_handle());
+        // Send REJ
+        send_sessions_reply(tx, &pdu.get_dest_handle(), &pdu.get_src_handle(), false).await;
+    }
+
+    
+}
+
+async fn send_sessions_reply(tx: &Sender<Vec<u8>>, handle: &str, dest: &str, ack: bool) {
+    let pdu = SessionReplyPDU::new(handle, dest, ack);
+    tx.send(pdu.as_vec()).await.unwrap();
 }
 
 async fn send_session_accept(tx: &Sender<Vec<u8>>, handle: &str, dest: &str, rsa_info: &Arc<Mutex<RSAInfo>>) {
@@ -246,18 +276,24 @@ async fn send_session_accept(tx: &Sender<Vec<u8>>, handle: &str, dest: &str, rsa
     let signature = rsa_info.lock().await.sign(handle.as_bytes());
 
     // Send PDU
-    let pdu = SessionReplyPDU::new(handle, dest, &signature);
+    let pdu = SessionAcceptPDU::new(handle, dest, &signature);
     tx.send(pdu.as_vec()).await.unwrap();
 }
 
-async fn check_session_response(pdu: SessionReplyPDU, sessions: &SessionsMap, rsa_info: &Arc<Mutex<RSAInfo>>) {
-    // Check hash
+async fn handle_session_accept(tx: &Sender<Vec<u8>>, pdu: SessionAcceptPDU, sessions: &SessionsMap, rsa_info: &Arc<Mutex<RSAInfo>>) {
+    // Check hash and signature
     if pdu.check_hash() && check_signature(&pdu.get_src_handle(), pdu.get_signature(), rsa_info).await {
         println!("Started session with {}", pdu.get_src_handle());
+        // Change status of session info to accepted
+        sessions.lock().await.get_mut(&pdu.get_src_handle()).unwrap().accept();
+        // Send ACK
+        send_sessions_reply(tx, &pdu.get_dest_handle(), &pdu.get_src_handle(), true).await;
     } else {
         println!("Could not start session with {}. Received bad reply", pdu.get_src_handle());
         // Remove sender from session map
         sessions.lock().await.remove(&pdu.get_src_handle());
+        // Send REJ
+        send_sessions_reply(tx, &pdu.get_dest_handle(), &pdu.get_src_handle(), false).await;
     }
 }
 
@@ -289,11 +325,11 @@ async fn display_message(pdu: MessagePDU, sessions: &SessionsMap) {
     };
 }
 
-async fn handle_bad_dest(pdu: BadDestPDU, sessions: &SessionsMap) {
-    println!("{} is not logged in", pdu.get_bad_dest());
+async fn handle_bad_dest(pdu: HandlePDU, sessions: &SessionsMap) {
+    println!("{} is not logged in", pdu.get_handle());
 
     // Remove bad dest from session map
-    sessions.lock().await.remove(&pdu.get_bad_dest());
+    sessions.lock().await.remove(&pdu.get_handle());
 }
 
 async fn write_to_server(server: &mut OwnedWriteHalf, mut rx: Receiver<Vec<u8>>) {
