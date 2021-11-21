@@ -104,11 +104,11 @@ async fn handle_input_from_user(handle: &str, tx: Sender<Vec<u8>>, sessions: Ses
         }
 
         match &input[0..2] {
-            "/m" | "/M" => send_message(handle, &input, &tx, &sessions, &mut nonce_gen).await.unwrap(),
-            "/s" | "/S" => initiate_session(handle, &input, &tx, &sessions, &rsa_info).await,
-            "/l" | "/L" => list_sessions(&sessions).await,
-            "/u" | "/U" => eprintln!("Not implemented."),
             "/h" | "/H" => println!("{}", usage),
+            "/u" | "/U" => list_users(&tx).await,
+            "/l" | "/L" => list_sessions(&sessions).await,
+            "/s" | "/S" => initiate_session(handle, &input, &tx, &sessions, &rsa_info).await,
+            "/m" | "/M" => send_message(handle, &input, &tx, &sessions, &mut nonce_gen).await.unwrap(),
             "/e" | "/E" => return Ok(()),
             _ => eprintln!("Unknown command. Type /h for help"),
         }
@@ -121,6 +121,11 @@ async fn stdin_readline() -> String {
         std::io::stdin().read_line(&mut input).unwrap();
         return input.trim().to_string();
     }).await.expect("Failed to read line from stdin")
+}
+
+async fn list_users(tx: &Sender<Vec<u8>>) {
+    let pdu = FlagOnlyPDU::new(10);
+    tx.send(pdu.as_vec()).await.unwrap();
 }
 
 async fn send_message(handle: &str, input: &str, tx: &Sender<Vec<u8>>, sessions: &SessionsMap, nonce_gen: &mut ChaCha20Rng) -> Result<(), Box<dyn Error>> {
@@ -198,13 +203,10 @@ async fn initiate_session(handle: &str, input: &str, tx: &Sender<Vec<u8>>, sessi
 }
 
 async fn list_sessions(sessions: &SessionsMap) {
-    println!("Sessions:");
+    println!("> Sessions:");
     for (user, session_info) in &*(sessions.lock().await) {
-        print!("    {} - ", user);
         if session_info.is_accepted() {
-            println!("Active");
-        } else {
-            println!("Not accepted");
+            println!("    {}", user);
         }
     }
 }
@@ -223,10 +225,28 @@ async fn handle_pdus_from_server(server: &mut OwnedReadHalf, tx: Sender<Vec<u8>>
             7 => handle_session_rej(SessionReplyPDU::from_bytes(buf), &sessions).await,
             8 => display_message(MessagePDU::from_bytes(buf), &sessions).await,
             9 => handle_bad_dest(HandlePDU::from_bytes(buf), &sessions).await,
+            11 => print_user_list(server).await,
             _ => eprintln!("Not implemented."),
         }
 
         prompt();
+    }
+}
+
+async fn print_user_list(server: &mut OwnedReadHalf) {
+    println!("Users:");
+
+    loop {
+        let buf = read_pdu(server).await.unwrap();
+
+        match get_flag_from_bytes(&buf) {
+            12 => {
+                let pdu = HandlePDU::from_bytes(buf);
+                println!("    {}", pdu.get_handle());
+            },
+            13 => return,
+            _ => panic!("Bad PDU in user list"),
+        }
     }
 }
 

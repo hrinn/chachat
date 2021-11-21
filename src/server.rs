@@ -78,6 +78,7 @@ async fn handle_pdus_from_client(client: &mut OwnedReadHalf, handle: &String, ch
 
         match get_flag_from_bytes(&buf) {
             4 | 5 | 6 | 7 | 8 => forward_pdu(ForwardPDU::from_bytes(buf), &channels).await,
+            10 => send_user_list(handle.as_str(), &channels).await,
             _ => unreachable!()
         }
     }
@@ -99,6 +100,29 @@ async fn forward_pdu(pdu: ForwardPDU, channels: &SenderMap) {
     } else {
         eprintln!("{} is not in session map", pdu.get_src_handle());
     }
+}
+
+async fn send_user_list(dest: &str, channels: &SenderMap) {
+    let lock = channels.lock().await; // Hold the lock for the duration of this function
+
+    // Get the channel to send back to the user
+    let tx = lock.get(dest).expect("Send not in sender map");
+
+    // Send start of list packet
+    let start_pdu = FlagOnlyPDU::new(11);
+    tx.send(start_pdu.as_vec()).await.unwrap();
+
+    // Send each user
+    for user in lock.keys() {
+        if user != dest {
+            let entry_pdu = HandlePDU::new(user, 12);
+            tx.send(entry_pdu.as_vec()).await.unwrap();
+        }
+    }
+
+    // Send end of list packet
+    let end_pdu = FlagOnlyPDU::new(13);
+    tx.send(end_pdu.as_vec()).await.unwrap();
 }
 
 async fn handle_pdus_to_client(write_client: &mut OwnedWriteHalf, mut rx: Receiver<Vec<u8>> ) {
