@@ -191,7 +191,13 @@ async fn initiate_session(handle: &str, input: &str, tx: &Sender<Vec<u8>>, sessi
 
     // Encrypt session key with dest's public key
     let key_path = get_public_key_path(dest);
-    let key_str = key_path_to_str(&key_path).expect("Invalid path to public key");
+    let key_str = match key_path_to_str(&key_path) {
+        Ok(key_str) => key_str,
+        Err(_) => {
+            println!("You do not have {}'s public key", dest);
+            return;
+        }
+    };
     let encrypted_key = rsa_info.lock().await.encrypt(&key, &key_str);
 
     // Sign handle with your private key

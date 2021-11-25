@@ -39,7 +39,7 @@ async fn main() {
             .about("Generates an RSA key to be used with ChaChat")
             .arg(Arg::with_name("handle")
                 .value_name("HANDLE")
-                .help("Username for logging into the server")
+                .help("Handle for logging into the server")
                 .required(true)
                 .index(1)))
             .get_matches();
@@ -57,18 +57,19 @@ async fn run_client(matches: &ArgMatches<'_>) {
     let hostname = matches.value_of("hostname").unwrap();
     let port = parse_port(matches.value_of("port"));
 
-    client::client(handle, hostname, port).await.unwrap_or_else(|err| {
-        println!("Client encountered error: {}", err);
+    if let Err(e) = client::client(handle, hostname, port).await {
+        println!("Client encountered error: {}", e);
         process::exit(1);
-    });
+    }
 }
 
 async fn run_server(matches: &ArgMatches<'_>) {
     let port = parse_port(matches.value_of("port"));
-    server::server(port).await.unwrap_or_else(|err| {
-        println!("Server encountered error: {}", err);
+    
+    if let Err(e) = server::server(port).await {
+        println!("Server encountered error: {}", e);
         process::exit(1);
-    });
+    }
 }
 
 fn parse_port(port: Option<&str>) -> u16 {
@@ -80,8 +81,9 @@ fn parse_port(port: Option<&str>) -> u16 {
 
 fn run_keygen(matches: &ArgMatches<'_>) {
     let handle = matches.value_of("handle").unwrap();
-    keygen::keygen(handle).unwrap_or_else(|err| {
-        println!("Error generating key: {}", err);
+
+    if let Err(e) = keygen::keygen(handle) {
+        println!("Error generating key: {}", e);
         process::exit(1);
-    });
+    }
 }
