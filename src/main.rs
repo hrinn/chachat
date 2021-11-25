@@ -15,9 +15,9 @@ async fn main() {
         .about("An encrypted messaging program for the command line")
         .subcommand(SubCommand::with_name("client")
             .about("Launches the ChaChat client")
-            .arg(Arg::with_name("username")
-                .value_name("NAME")
-                .help("Username to receive messages for and send messages from")
+            .arg(Arg::with_name("handle")
+                .value_name("HANDLE")
+                .help("Handle to receive and send messages from")
                 .required(true)
                 .index(1))
             .arg(Arg::with_name("hostname")
@@ -37,8 +37,8 @@ async fn main() {
                 .index(1)))
         .subcommand(SubCommand::with_name("keygen")
             .about("Generates an RSA key to be used with ChaChat")
-            .arg(Arg::with_name("username")
-                .value_name("NAME")
+            .arg(Arg::with_name("handle")
+                .value_name("HANDLE")
                 .help("Username for logging into the server")
                 .required(true)
                 .index(1)))
@@ -53,11 +53,11 @@ async fn main() {
 }
 
 async fn run_client(matches: &ArgMatches<'_>) {
-    let username = matches.value_of("username").unwrap();
+    let handle = matches.value_of("handle").unwrap();
     let hostname = matches.value_of("hostname").unwrap();
     let port = parse_port(matches.value_of("port"));
 
-    client::client(username, hostname, port).await.unwrap_or_else(|err| {
+    client::client(handle, hostname, port).await.unwrap_or_else(|err| {
         println!("Client encountered error: {}", err);
         process::exit(1);
     });
@@ -79,8 +79,8 @@ fn parse_port(port: Option<&str>) -> u16 {
 }
 
 fn run_keygen(matches: &ArgMatches<'_>) {
-    let username = matches.value_of("username").unwrap();
-    keygen::keygen(username).unwrap_or_else(|err| {
+    let handle = matches.value_of("handle").unwrap();
+    keygen::keygen(handle).unwrap_or_else(|err| {
         println!("Error generating key: {}", err);
         process::exit(1);
     });

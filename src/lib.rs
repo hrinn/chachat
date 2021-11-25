@@ -471,8 +471,12 @@ pub fn get_flag_from_bytes(bytes: &BytesMut) -> u8 {
     bytes[2]
 }
 
+pub fn get_key_dir() -> String {
+    format!("{}/.chachat", env::var("HOME").unwrap())
+}
+
 pub fn get_private_key_path(handle: &str) -> String {
-    format!("{}/.chachat/{}", env::var("HOME").unwrap(), handle)
+    format!("{}/{}", get_key_dir(), handle)
 }
 
 pub fn get_public_key_path(handle: &str) -> String {
