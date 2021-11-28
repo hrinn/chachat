@@ -15,7 +15,7 @@ pub async fn server(port: u16) -> Result<(), Box<dyn Error>> {
     let channels = Arc::new(Mutex::new(HashMap::new()));
 
     // Set up TCP Listener
-    let host = format!("localhost:{}", port);
+    let host = format!("0.0.0.0:{}", port);
     println!("Launching server on {}", host);
     let listener = TcpListener::bind(host).await?;
 
