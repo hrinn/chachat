@@ -1,12 +1,12 @@
-use std::error::Error;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::net::TcpListener;
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::mpsc::{Sender, Receiver, channel};
-use tokio::io::{AsyncWriteExt};
-use futures::lock::Mutex;
 use chachat::*;
+use futures::lock::Mutex;
+use std::collections::HashMap;
+use std::error::Error;
+use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::TcpListener;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 type SenderMap = Arc<Mutex<HashMap<String, Sender<Vec<u8>>>>>;
 
@@ -30,8 +30,11 @@ pub async fn server(port: u16) -> Result<(), Box<dyn Error>> {
 
         if channels.lock().await.contains_key(&handle_pdu.get_handle()) {
             send_handle_response(&mut write_client, false).await;
-            println!("{} connecting from {} rejected: Handle already in use", 
-                handle_pdu.get_handle(), addr);
+            println!(
+                "{} connecting from {} rejected: Handle already in use",
+                handle_pdu.get_handle(),
+                addr
+            );
         } else {
             send_handle_response(&mut write_client, true).await;
             println!("{} connected from {}", handle_pdu.get_handle(), addr);
@@ -40,7 +43,7 @@ pub async fn server(port: u16) -> Result<(), Box<dyn Error>> {
 
             // Add handle and channel to channels table
             channels.lock().await.insert(handle_pdu.get_handle(), tx);
- 
+
             tokio::spawn(async move {
                 handle_pdus_from_client(&mut read_client, &handle_pdu.get_handle(), channels).await;
             });
@@ -48,44 +51,45 @@ pub async fn server(port: u16) -> Result<(), Box<dyn Error>> {
             tokio::spawn(async move {
                 handle_pdus_to_client(&mut write_client, rx).await;
             });
-        }       
+        }
     }
 }
 
 async fn send_handle_response(client: &mut OwnedWriteHalf, accepted: bool) {
-    let flag: u8 = if accepted {
-        2
-    } else {
-        3
-    };
+    let flag: u8 = if accepted { 2 } else { 3 };
     let pdu = FlagOnlyPDU::new(flag);
     client.write_all(pdu.as_bytes()).await.unwrap_or_else(|e| {
         eprintln!("error sending handle response to client: {:?}", e);
     });
 }
 
-async fn handle_pdus_from_client(client: &mut OwnedReadHalf, handle: &String, channels: SenderMap) {
+async fn handle_pdus_from_client(client: &mut OwnedReadHalf, handle: &str, channels: SenderMap) {
     loop {
         let buf = match read_pdu(client).await {
-        Err(_) => {
-            println!("{} disconnected", handle);
-            // remove sender that corresponds to this handle from sender map
-            channels.lock().await.remove(handle);
-            return;
-        },
-        Ok(buf) => buf
+            Err(_) => {
+                println!("{} disconnected", handle);
+                // remove sender that corresponds to this handle from sender map
+                channels.lock().await.remove(handle);
+                return;
+            }
+            Ok(buf) => buf,
         };
 
         match get_flag_from_bytes(&buf) {
             4 | 5 | 6 | 7 | 8 => forward_pdu(ForwardPDU::from_bytes(buf), &channels).await,
-            10 => send_user_list(handle.as_str(), &channels).await,
-            _ => unreachable!()
+            10 => send_user_list(handle, &channels).await,
+            _ => unreachable!(),
         }
     }
 }
 
 async fn forward_pdu(pdu: ForwardPDU, channels: &SenderMap) {
-    println!("{} -> {}: {}B", pdu.get_src_handle(), pdu.get_dest_handle(), pdu.len());
+    println!(
+        "{} -> {}: {}B",
+        pdu.get_src_handle(),
+        pdu.get_dest_handle(),
+        pdu.len()
+    );
 
     if let Some(tx) = channels.lock().await.get(&pdu.get_dest_handle()) {
         tx.send(pdu.as_vec()).await.unwrap();
@@ -93,7 +97,7 @@ async fn forward_pdu(pdu: ForwardPDU, channels: &SenderMap) {
     }
 
     println!("{} is not logged in", pdu.get_dest_handle());
-    
+
     let resp_pdu = HandlePDU::new(&pdu.get_dest_handle(), 9);
     if let Some(my_tx) = channels.lock().await.get(&pdu.get_src_handle()) {
         my_tx.send(resp_pdu.as_vec()).await.unwrap(); // Send no recipient PDU back to client
@@ -125,7 +129,7 @@ async fn send_user_list(dest: &str, channels: &SenderMap) {
     tx.send(end_pdu.as_vec()).await.unwrap();
 }
 
-async fn handle_pdus_to_client(write_client: &mut OwnedWriteHalf, mut rx: Receiver<Vec<u8>> ) {
+async fn handle_pdus_to_client(write_client: &mut OwnedWriteHalf, mut rx: Receiver<Vec<u8>>) {
     loop {
         if let Some(msg) = rx.recv().await {
             write_client.write_all(&msg).await.unwrap();

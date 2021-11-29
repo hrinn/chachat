@@ -1,9 +1,9 @@
 extern crate clap;
-use clap::{Arg, App, SubCommand, ArgMatches};
+use clap::{App, Arg, ArgMatches, SubCommand};
 use std::process;
 mod client;
-mod server;
 mod keygen;
+mod server;
 
 const DEFAULT_PORT: u16 = 3030;
 
@@ -13,36 +13,52 @@ async fn main() {
         .version("0.1.0")
         .author("Hayden Rinn and Adam Perlin")
         .about("An encrypted messaging program for the command line")
-        .subcommand(SubCommand::with_name("client")
-            .about("Launches the ChaChat client")
-            .arg(Arg::with_name("handle")
-                .value_name("HANDLE")
-                .help("Handle to receive and send messages from")
-                .required(true)
-                .index(1))
-            .arg(Arg::with_name("hostname")
-                .value_name("HOST")
-                .help("Server's hostname")
-                .required(true)
-                .index(2))
-            .arg(Arg::with_name("port")
-                .value_name("PORT")
-                .help("Server's port")
-                .index(3)))   
-        .subcommand(SubCommand::with_name("server")
-            .about("Launches the ChaChat server")
-            .arg(Arg::with_name("port")
-                .value_name("PORT")
-                .help("Server's port")
-                .index(1)))
-        .subcommand(SubCommand::with_name("keygen")
-            .about("Generates an RSA key to be used with ChaChat")
-            .arg(Arg::with_name("handle")
-                .value_name("HANDLE")
-                .help("Handle for logging into the server")
-                .required(true)
-                .index(1)))
-            .get_matches();
+        .subcommand(
+            SubCommand::with_name("client")
+                .about("Launches the ChaChat client")
+                .arg(
+                    Arg::with_name("handle")
+                        .value_name("HANDLE")
+                        .help("Handle to receive and send messages from")
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::with_name("hostname")
+                        .value_name("HOST")
+                        .help("Server's hostname")
+                        .required(true)
+                        .index(2),
+                )
+                .arg(
+                    Arg::with_name("port")
+                        .value_name("PORT")
+                        .help("Server's port")
+                        .index(3),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("server")
+                .about("Launches the ChaChat server")
+                .arg(
+                    Arg::with_name("port")
+                        .value_name("PORT")
+                        .help("Server's port")
+                        .index(1),
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("keygen")
+                .about("Generates an RSA key to be used with ChaChat")
+                .arg(
+                    Arg::with_name("handle")
+                        .value_name("HANDLE")
+                        .help("Handle for logging into the server")
+                        .required(true)
+                        .index(1),
+                ),
+        )
+        .get_matches();
 
     match app_m.subcommand() {
         ("client", Some(client_m)) => run_client(client_m).await,
@@ -65,7 +81,7 @@ async fn run_client(matches: &ArgMatches<'_>) {
 
 async fn run_server(matches: &ArgMatches<'_>) {
     let port = parse_port(matches.value_of("port"));
-    
+
     if let Err(e) = server::server(port).await {
         println!("Server encountered error: {}", e);
         process::exit(1);
